@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: pis_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+    environment:
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+      - MAPBOX_TOKEN=${MAPBOX_TOKEN}
+      - ARCGIS_API_KEY=${ARCGIS_API_KEY}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=minicpm-v
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: pis_frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pis_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
