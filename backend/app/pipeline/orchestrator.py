@@ -60,8 +60,14 @@ class PipelineOrchestrator:
 
     async def submit_batch(self, requests: List[PropertyRequest], batch_id: Optional[str] = None) -> str:
         batch_id = batch_id or str(uuid.uuid4())
+        seen: set = set()
         job_ids = []
         for req in requests:
+            key = (round(req.latitude, 6), round(req.longitude, 6))
+            if key in seen:
+                logger.warning(f"Duplicate coordinates in batch, skipping: {key}")
+                continue
+            seen.add(key)
             job = await self.submit_property(req)
             job_ids.append(job.job_id)
         self._batches[batch_id] = job_ids
@@ -103,14 +109,30 @@ class PipelineOrchestrator:
             self._update_job(job, status=PropertyJobStatus.PROCESSING)
 
             try:
-                # Stage 1: GIS
-                parcel = await self._run_stage(job, "gis_fetch", self._stage_gis, job)
+                # Stages 1-3 run in PARALLEL: GIS, Satellite, Street View all need
+                # only lat/lon and don't depend on each other.
+                gis_stage = PipelineStage(name="gis_fetch", status=PipelineStageStatus.RUNNING)
+                sat_stage = PipelineStage(name="satellite_capture", status=PipelineStageStatus.RUNNING)
+                str_stage = PipelineStage(name="street_capture", status=PipelineStageStatus.RUNNING)
+                job.stages.extend([gis_stage, sat_stage, str_stage])
+                self._update_job(job)
 
-                # Stage 2: Satellite capture
-                satellite_path = await self._run_stage(job, "satellite_capture", self._stage_satellite, job, parcel)
+                t0 = time.monotonic()
+                parcel, satellite_path, street_paths = await asyncio.gather(
+                    self._timed_stage(gis_stage, self._stage_gis(job)),
+                    self._timed_stage(sat_stage, self._stage_satellite_no_parcel(job)),
+                    self._timed_stage(str_stage, self._stage_street_no_parcel(job)),
+                    return_exceptions=True,
+                )
+                logger.info(f"Parallel capture done in {(time.monotonic()-t0)*1000:.0f}ms")
 
-                # Stage 3: Street view capture
-                street_paths = await self._run_stage(job, "street_capture", self._stage_street, job, parcel)
+                # Treat exceptions as None (pipeline continues with partial data)
+                if isinstance(parcel, Exception):
+                    logger.warning(f"GIS failed: {parcel}"); parcel = None
+                if isinstance(satellite_path, Exception):
+                    logger.warning(f"Satellite failed: {satellite_path}"); satellite_path = None
+                if isinstance(street_paths, Exception):
+                    logger.warning(f"Street failed: {street_paths}"); street_paths = {}
 
                 # Stage 4: Vision analysis
                 vision_result = await self._run_stage(job, "vision_analysis", self._stage_vision, satellite_path, street_paths)
@@ -121,12 +143,25 @@ class PipelineOrchestrator:
                 job.result = result
                 self._update_job(job, status=PropertyJobStatus.COMPLETED)
 
-                # Stage 6: Report generation (non-blocking)
+                # Stage 6: Report (non-blocking)
                 await self._run_stage(job, "report_generation", self._stage_report, job)
 
             except Exception as e:
                 logger.exception(f"Pipeline failed for job {job_id}: {e}")
                 self._update_job(job, status=PropertyJobStatus.FAILED, error=str(e))
+
+    async def _timed_stage(self, stage: PipelineStage, coro):
+        t0 = time.monotonic()
+        try:
+            result = await coro
+            stage.status = PipelineStageStatus.COMPLETED
+            stage.duration_ms = (time.monotonic() - t0) * 1000
+            return result
+        except Exception as e:
+            stage.status = PipelineStageStatus.FAILED
+            stage.error = str(e)
+            stage.duration_ms = (time.monotonic() - t0) * 1000
+            raise
 
     async def _run_stage(self, job: PropertyJob, name: str, fn, *args):
         stage = PipelineStage(name=name, status=PipelineStageStatus.RUNNING)
@@ -147,6 +182,15 @@ class PipelineOrchestrator:
 
     async def _stage_gis(self, job: PropertyJob):
         return await self.gis.get_parcel(job.latitude, job.longitude)
+
+    async def _stage_satellite_no_parcel(self, job: PropertyJob):
+        """Satellite capture without waiting for GIS parcel (uses lat/lon only)."""
+        return await self.satellite.capture(job.latitude, job.longitude, {}, job.job_id)
+
+    async def _stage_street_no_parcel(self, job: PropertyJob):
+        """Street capture without waiting for GIS parcel."""
+        svc = StreetCaptureService()
+        return await svc.capture_all(job.latitude, job.longitude, job.job_id)
 
     async def _stage_satellite(self, job: PropertyJob, parcel):
         return await self.satellite.capture(job.latitude, job.longitude, parcel or {}, job.job_id)

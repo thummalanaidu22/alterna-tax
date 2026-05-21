@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle, XCircle, AlertTriangle, Activity, Cpu } from "lucide-react";
+import { CheckCircle, XCircle, AlertTriangle, Activity, Cpu, Target, BarChart2 } from "lucide-react";
 import { propertyApi } from "../services/api";
 import { Card } from "../components/ui/Card";
 import { StatusBadge } from "../components/ui/StatusBadge";
@@ -20,12 +20,19 @@ export function DashboardPage() {
     refetchInterval: 10000,
   });
 
+  const completed = jobs.filter((j) => j.status === "completed");
   const stats = {
     total: jobs.length,
     approved: jobs.filter((j) => j.result?.decision === "APPROVED").length,
     rejected: jobs.filter((j) => j.result?.decision === "REJECTED").length,
     review: jobs.filter((j) => j.result?.decision === "NEEDS_HUMAN_REVIEW").length,
     processing: jobs.filter((j) => j.status === "queued" || j.status === "processing").length,
+    accuracy: completed.length > 0
+      ? Math.round((completed.filter((j) => j.result?.decision !== "NEEDS_HUMAN_REVIEW").length / completed.length) * 100)
+      : 0,
+    avgConfidence: completed.length > 0
+      ? Math.round((completed.reduce((s, j) => s + (j.result?.confidence_score ?? 0), 0) / completed.length) * 100)
+      : 0,
   };
 
   const recentJobs = jobs.slice(0, 8);
@@ -50,11 +57,11 @@ export function DashboardPage() {
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         {[
-          { label: "Total Jobs", val: stats.total, icon: <Activity className="w-4 h-4" />, color: "text-white" },
-          { label: "Approved", val: stats.approved, icon: <CheckCircle className="w-4 h-4" />, color: "text-emerald-400" },
-          { label: "Rejected", val: stats.rejected, icon: <XCircle className="w-4 h-4" />, color: "text-red-400" },
-          { label: "Review", val: stats.review, icon: <AlertTriangle className="w-4 h-4" />, color: "text-amber-400" },
-          { label: "Active", val: stats.processing, icon: <Cpu className="w-4 h-4" />, color: "text-blue-400" },
+          { label: "Total Jobs",  val: stats.total,      icon: <Activity className="w-4 h-4" />,      color: "text-white" },
+          { label: "Approved",    val: stats.approved,   icon: <CheckCircle className="w-4 h-4" />,   color: "text-emerald-400" },
+          { label: "Rejected",    val: stats.rejected,   icon: <XCircle className="w-4 h-4" />,       color: "text-red-400" },
+          { label: "Review",      val: stats.review,     icon: <AlertTriangle className="w-4 h-4" />, color: "text-amber-400" },
+          { label: "Active",      val: stats.processing, icon: <Cpu className="w-4 h-4" />,           color: "text-blue-400" },
         ].map((s) => (
           <Card key={s.label} className="text-center">
             <div className={`flex justify-center mb-2 ${s.color} opacity-70`}>{s.icon}</div>
@@ -63,6 +70,32 @@ export function DashboardPage() {
           </Card>
         ))}
       </div>
+
+      {/* Accuracy metrics */}
+      {completed.length > 0 && (
+        <div className="grid grid-cols-2 gap-3">
+          <Card className="flex items-center gap-4">
+            <div className="p-2 rounded-lg bg-violet-500/10">
+              <Target className="w-5 h-5 text-violet-400" />
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-violet-400">{stats.accuracy}%</div>
+              <div className="text-xs text-gray-500">Model Decisiveness</div>
+              <div className="text-xs text-gray-700 mt-0.5">Definitive decisions vs review</div>
+            </div>
+          </Card>
+          <Card className="flex items-center gap-4">
+            <div className="p-2 rounded-lg bg-sky-500/10">
+              <BarChart2 className="w-5 h-5 text-sky-400" />
+            </div>
+            <div>
+              <div className="text-2xl font-bold text-sky-400">{stats.avgConfidence}%</div>
+              <div className="text-xs text-gray-500">Avg Confidence Score</div>
+              <div className="text-xs text-gray-700 mt-0.5">Across {completed.length} completed jobs</div>
+            </div>
+          </Card>
+        </div>
+      )}
 
       {/* Approval rate bar */}
       {stats.total > 0 && (

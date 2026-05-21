@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from ..config import settings
-from ..services.vision_service import VisionService, TEST_MODEL
+from ..services.vision_service import VisionService, PROD_MODEL
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -13,5 +13,5 @@ async def health():
         "status": "ok",
         "version": settings.app_version,
         "ollama": "connected" if ollama_ok else "disconnected",
-        "model": TEST_MODEL,  # switch to settings.ollama_model when using MiniCPM-V
+        "model": PROD_MODEL,
     }

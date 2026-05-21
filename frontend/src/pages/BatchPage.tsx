@@ -1,31 +1,34 @@
-import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Upload, Plus, Trash2, PlayCircle } from "lucide-react";
+import { Upload, Plus, Trash2, PlayCircle, Download } from "lucide-react";
+import * as XLSX from "xlsx";
+import { useDispatch, useSelector } from "react-redux";
+import { useRef } from "react";
 import { propertyApi } from "../services/api";
 import type { PropertyRequest } from "../types/property";
+import type { RootState } from "../store";
+import {
+  setBatchRows,
+  addBatchRow,
+  removeBatchRow,
+  updateBatchRow,
+  setBatchId,
+  type BatchRow,
+} from "../store/jobsSlice";
 import { Card } from "../components/ui/Card";
 import { Spinner } from "../components/ui/Spinner";
 import { StatusBadge } from "../components/ui/StatusBadge";
 import { DecisionBadge } from "../components/ui/DecisionBadge";
 
-interface RowInput {
-  id: string;
-  latitude: string;
-  longitude: string;
-  property_id: string;
-}
-
-function newRow(): RowInput {
-  return { id: crypto.randomUUID(), latitude: "", longitude: "", property_id: "" };
-}
-
 export function BatchPage() {
-  const [rows, setRows] = useState<RowInput[]>([newRow()]);
-  const [batchId, setBatchId] = useState<string | null>(null);
+  const dispatch = useDispatch();
+  const rows = useSelector((s: RootState) => s.jobs.batchRows);
+  const batchId = useSelector((s: RootState) => s.jobs.batchId);
+  const submittingRef = useRef(false);
 
   const submitMutation = useMutation({
     mutationFn: propertyApi.analyzeBatch,
-    onSuccess: (res) => setBatchId(res.batch_id),
+    onSuccess: (res) => dispatch(setBatchId(res.batch_id)),
+    onSettled: () => { submittingRef.current = false; },
   });
 
   const { data: batchStatus } = useQuery({
@@ -39,10 +42,32 @@ export function BatchPage() {
     },
   });
 
-  const addRow = () => setRows((prev) => [...prev, newRow()]);
-  const removeRow = (id: string) => setRows((prev) => prev.filter((r) => r.id !== id));
-  const updateRow = (id: string, field: keyof RowInput, value: string) =>
-    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: value } : r)));
+  const parseCSVRow = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const next = text[i + 1];
+      if (inQuotes) {
+        if (ch === '"' && next === '"') { field += '"'; i++; }
+        else if (ch === '"') { inQuotes = false; }
+        else { field += ch; }
+      } else {
+        if (ch === '"') { inQuotes = true; }
+        else if (ch === ',') { row.push(field); field = ""; }
+        else if (ch === '\n' || ch === '\r') {
+          row.push(field); field = "";
+          if (row.some((f) => f.length > 0)) rows.push(row);
+          row = [];
+          if (ch === '\r' && next === '\n') i++;
+        } else { field += ch; }
+      }
+    }
+    if (field || row.length > 0) { row.push(field); if (row.some((f) => f.length > 0)) rows.push(row); }
+    return rows;
+  };
 
   const handleCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -50,17 +75,40 @@ export function BatchPage() {
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target?.result as string;
-      const lines = text.split("\n").filter(Boolean);
-      const newRows: RowInput[] = lines.slice(1).map((line) => {
-        const parts = line.split(",").map((p) => p.trim());
-        return { id: crypto.randomUUID(), latitude: parts[0] || "", longitude: parts[1] || "", property_id: parts[2] || "" };
-      });
-      if (newRows.length > 0) setRows(newRows);
+      const parsed = parseCSVRow(text);
+      if (parsed.length < 2) return;
+
+      const headers = parsed[0].map((h) => h.toLowerCase().trim());
+      const latIdx = headers.findIndex((h) => h === "latitude");
+      const lngIdx = headers.findIndex((h) => h === "longitude");
+      const mapIdx = headers.findIndex((h) => h === "googlemap");
+      const propIdIdx = headers.findIndex((h) => ["parcelid", "propertyappraiserformat", "property_id", "id"].includes(h));
+
+      const newRows: BatchRow[] = parsed
+        .slice(1)
+        .map((parts) => {
+          let lat = latIdx >= 0 ? parts[latIdx]?.trim() ?? "" : "";
+          let lng = lngIdx >= 0 ? parts[lngIdx]?.trim() ?? "" : "";
+
+          if ((!lat || !lng) && mapIdx >= 0) {
+            const match = (parts[mapIdx] ?? "").match(/query=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
+            if (match) { lat = lat || match[1]; lng = lng || match[2]; }
+          }
+
+          const propId = propIdIdx >= 0 ? parts[propIdIdx]?.trim() ?? "" : "";
+          return { id: crypto.randomUUID(), latitude: lat, longitude: lng, property_id: propId };
+        })
+        .filter((r) => r.latitude && r.longitude);
+
+      if (newRows.length > 0) dispatch(setBatchRows(newRows));
     };
     reader.readAsText(file);
   };
 
   const handleSubmit = () => {
+    if (submittingRef.current || submitMutation.isPending) return;
+    submittingRef.current = true;
+
     const properties: PropertyRequest[] = rows
       .filter((r) => r.latitude && r.longitude)
       .map((r) => ({
@@ -68,12 +116,54 @@ export function BatchPage() {
         longitude: parseFloat(r.longitude),
         property_id: r.property_id || undefined,
       }));
-    if (properties.length === 0) return;
-    setBatchId(null);
+    if (properties.length === 0) { submittingRef.current = false; return; }
+    dispatch(setBatchId(null));
     submitMutation.mutate({ properties });
   };
 
   const validRows = rows.filter((r) => r.latitude && r.longitude).length;
+
+  const buildExportRows = () =>
+    (batchStatus?.jobs ?? []).map((job) => ({
+      Property: job.property_id || job.job_id,
+      Latitude: job.latitude,
+      Longitude: job.longitude,
+      Status: job.status,
+      Decision: job.result?.decision ?? "",
+      Confidence: job.result ? `${Math.round(job.result.confidence_score * 100)}%` : "",
+      PropertyType: job.result?.property_type ?? "",
+      RejectionReasons: job.result?.rejection_reasons?.join("; ") ?? "",
+      ReviewReasons: job.result?.human_review_reasons?.join("; ") ?? "",
+      Summary: job.result?.summary ?? "",
+    }));
+
+  const downloadCSV = () => {
+    const data = buildExportRows();
+    if (data.length === 0) return;
+    const headers = Object.keys(data[0]);
+    const csvLines = [
+      headers.join(","),
+      ...data.map((row) =>
+        headers.map((h) => `"${String(row[h as keyof typeof row]).replace(/"/g, '""')}"`).join(",")
+      ),
+    ];
+    const blob = new Blob([csvLines.join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `batch_results_${batchId?.slice(0, 8) ?? "export"}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadXLSX = () => {
+    const data = buildExportRows();
+    if (data.length === 0) return;
+    const ws = XLSX.utils.json_to_sheet(data);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Results");
+    XLSX.writeFile(wb, `batch_results_${batchId?.slice(0, 8) ?? "export"}.xlsx`);
+  };
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -106,11 +196,11 @@ export function BatchPage() {
                   step="any"
                   placeholder={field === "property_id" ? "optional" : field}
                   value={row[field]}
-                  onChange={(e) => updateRow(row.id, field, e.target.value)}
+                  onChange={(e) => dispatch(updateBatchRow({ id: row.id, field, value: e.target.value }))}
                   className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-blue-500 transition-colors"
                 />
               ))}
-              <button onClick={() => removeRow(row.id)} className="text-gray-700 hover:text-red-400 transition-colors">
+              <button onClick={() => dispatch(removeBatchRow(row.id))} className="text-gray-700 hover:text-red-400 transition-colors">
                 <Trash2 className="w-4 h-4" />
               </button>
             </div>
@@ -118,7 +208,7 @@ export function BatchPage() {
         </div>
 
         <div className="flex items-center gap-3 mt-4 pt-4 border-t border-gray-800">
-          <button onClick={addRow} className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors">
+          <button onClick={() => dispatch(addBatchRow())} className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors">
             <Plus className="w-3.5 h-3.5" /> Add Row
           </button>
           <button
@@ -155,6 +245,22 @@ export function BatchPage() {
               className="h-full bg-blue-500 transition-all duration-500"
               style={{ width: `${batchStatus.total ? ((batchStatus.completed + batchStatus.failed) / batchStatus.total) * 100 : 0}%` }}
             />
+          </div>
+
+          {/* Download buttons */}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={downloadCSV}
+              className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-medium rounded-lg transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" /> Download CSV
+            </button>
+            <button
+              onClick={downloadXLSX}
+              className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-xs font-medium rounded-lg transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" /> Download XLSX
+            </button>
           </div>
 
           {/* Jobs table */}

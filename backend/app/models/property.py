@@ -14,6 +14,7 @@ class PropertyType(str, Enum):
     COMMERCIAL = "commercial"
     VACANT_LAND = "vacant_land"
     AGRICULTURE = "agriculture"
+    
     UNKNOWN = "unknown"
 
 
@@ -33,19 +34,61 @@ class NeighborhoodDensity(str, Enum):
     UNKNOWN = "unknown"
 
 
+class WaterBodyType(str, Enum):
+    NONE = "none"
+    POND = "pond"        # small isolated water hole on land — REJECT agriculture
+    POOL = "pool"        # swimming pool — OK
+    LAKE = "lake"        # large lake bordering parcel — OK
+    CANAL = "canal"      # canal — OK
+    OCEAN = "ocean"      # ocean/bay — OK
+    BAY = "bay"          # bay — OK
+    UNKNOWN = "unknown"
+
+
+class MedicalType(str, Enum):
+    NONE = "none"
+    HOSPITAL = "hospital"         # large hospital — REJECT
+    CLINIC = "clinic"             # doctor's office / clinic — OK
+    DOCTORS_OFFICE = "doctors_office"  # doctor's office — OK
+
+
+class SchoolType(str, Enum):
+    NONE = "none"
+    SCHOOL = "school"             # K-12 school — REJECT
+    PRESCHOOL = "preschool"       # pre-school / daycare — OK
+
+
 class PropertyObservations(BaseModel):
-    boarded_windows: bool = False
+    # Residential flags
+    boarded_windows: bool = False            # plywood boards — REJECT
+    hurricane_shutters: bool = False         # accordion/panel shutters — OK
     roof_damage: bool = False
     visible_structure_damage: bool = False
+    structure_burned: bool = False
     abandoned_appearance: bool = False
     trash_or_debris: bool = False
+    vacancy_signs: bool = False              # overgrown, no vehicles, neglected
+    mobile_home: bool = False               # mobile/manufactured housing
+    under_construction: bool = False        # structure mid-construction
+
+    # Access / land
     road_access: bool = True
     landlocked: bool = False
     wooded: bool = False
-    water_body_present: bool = False
+
+    # Water
+    water_body_type: WaterBodyType = WaterBodyType.NONE
+
+    # Shape & buildability
     parcel_shape: ParcelShape = ParcelShape.UNKNOWN
     buildable: bool = True
+    has_structure: bool = False              # parcel has a house/building on it
+
+    # Commercial classification
     commercial_type_detected: str = "none"
+    medical_type: MedicalType = MedicalType.NONE
+    school_type: SchoolType = SchoolType.NONE
+
     neighborhood_density: NeighborhoodDensity = NeighborhoodDensity.UNKNOWN
 
 
@@ -63,6 +106,7 @@ class PropertyRequest(BaseModel):
     latitude: float = Field(..., ge=-90, le=90)
     longitude: float = Field(..., ge=-180, le=180)
     property_id: Optional[str] = None
+    property_type_hint: Optional[str] = None  # from CSV zoning data
 
 
 class BatchPropertyRequest(BaseModel):
