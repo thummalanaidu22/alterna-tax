@@ -1,0 +1,38 @@
+{
+    # ACME (Let's Encrypt) contact email — required for production TLS
+    email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+    encode gzip
+
+    # Backend API
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+
+    # Backend-served static files (satellite + street view images, reports)
+    handle /images/* {
+        reverse_proxy backend:8000
+    }
+    handle /reports/* {
+        reverse_proxy backend:8000
+    }
+
+    # Everything else → React SPA (served by nginx inside the frontend container)
+    handle {
+        reverse_proxy frontend:80
+    }
+
+    # Security headers applied at the edge
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}

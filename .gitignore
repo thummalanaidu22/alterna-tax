@@ -1,1 +1,51 @@
+<<<<<<< HEAD
 .DS_Store
+=======
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+dist/
+.cache/
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+
+# Data & logs
+backend/data/properties/*/
+backend/logs/
+
+# OS
+.DS_Store
+*.swp
+
+# Folders
+Property-16/
+data/
+>>>>>>> 24476d8a4721834975a4ea3007475ef3bae2f746
