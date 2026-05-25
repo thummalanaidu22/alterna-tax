@@ -66,7 +66,7 @@ class SatelliteService:
     """
 
     def __init__(self):
-        self.output_dir = Path(settings.image_output_dir) / "satellite"
+        self.output_dir = (Path(settings.image_output_dir) / "satellite").resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.zoom = settings.satellite_zoom
         self.size = settings.satellite_image_width
@@ -98,7 +98,7 @@ class SatelliteService:
         out_path = self.output_dir / f"{job_id}_satellite.jpg"
         img.save(str(out_path), "JPEG", quality=85)
         logger.info(f"Satellite image saved: {out_path}")
-        return str(out_path)
+        return str(out_path.resolve())
 
     # ── ESRI tile fetching ──────────────────────────────────────────────────────
 

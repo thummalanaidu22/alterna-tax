@@ -137,8 +137,10 @@ class PipelineOrchestrator:
                 # Stage 4: Vision analysis
                 vision_result = await self._run_stage(job, "vision_analysis", self._stage_vision, satellite_path, street_paths)
 
-                # Stage 5: Rule engine
-                result = await self._run_stage(job, "rule_engine", self._stage_rules, vision_result, parcel)
+                # Stage 5: Rule engine — pass aerial availability so SOP can enforce it
+                aerial_available = satellite_path is not None
+                parcel_with_flags = {**(parcel or {}), "aerial_image_available": aerial_available}
+                result = await self._run_stage(job, "rule_engine", self._stage_rules, vision_result, parcel_with_flags)
 
                 job.result = result
                 self._update_job(job, status=PropertyJobStatus.COMPLETED)
@@ -191,20 +193,6 @@ class PipelineOrchestrator:
         """Street capture without waiting for GIS parcel."""
         svc = StreetCaptureService()
         return await svc.capture_all(job.latitude, job.longitude, job.job_id)
-
-    async def _stage_satellite(self, job: PropertyJob, parcel):
-        return await self.satellite.capture(job.latitude, job.longitude, parcel or {}, job.job_id)
-
-    async def _stage_street(self, job: PropertyJob, parcel):
-        # Use OSM parcel centroid as marker target for accurate bearing calculation
-        centroid = (parcel or {}).get("centroid")
-        marker_lat = centroid[1] if centroid else None
-        marker_lon = centroid[0] if centroid else None
-        svc = StreetCaptureService()
-        return await svc.capture_all(
-            job.latitude, job.longitude, job.job_id,
-            marker_lat=marker_lat, marker_lon=marker_lon,
-        )
 
     async def _stage_vision(self, satellite_path, street_paths):
         return await self.vision.analyze(satellite_path, street_paths or {})

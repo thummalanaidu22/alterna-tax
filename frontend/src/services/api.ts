@@ -6,10 +6,15 @@ import type {
   BatchRequest,
 } from "../types/property";
 
+const _apiKey = import.meta.env.VITE_API_KEY as string | undefined;
+
 const http = axios.create({
   baseURL: "/api",
   timeout: 30000,
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    ...(_apiKey ? { "X-API-Key": _apiKey } : {}),
+  },
 });
 
 export const propertyApi = {

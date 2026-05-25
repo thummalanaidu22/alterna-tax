@@ -62,10 +62,11 @@ _STREET_VIEW_URL = (
 )
 
 _UI_SELECTORS_TO_HIDE = [
-    "#gb", ".app-viewcard-strip", ".scene-footer", ".searchbox",
-    "#searchboxinput", ".minimap", ".navigation-control", ".zoom-control",
+    "#gb", ".app-viewcard-strip", ".scene-footer",
+    ".searchbox", "#searchboxinput",
+    ".minimap", ".navigation-control", ".zoom-control",
     "button[aria-label='Street View']", "button[aria-label='Satellite']",
-    "[jsaction*='settings']",
+    "[jsaction*='settings']", ".watermark",
 ]
 
 _VIEW_NAMES: List[str] = ["left", "center", "right"]
@@ -89,7 +90,7 @@ class StreetCaptureService:
     """
 
     def __init__(self):
-        self.output_dir = Path(settings.image_output_dir) / "street"
+        self.output_dir = (Path(settings.image_output_dir) / "street").resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._pw: Optional[Playwright] = None
         self._browser = None
@@ -238,7 +239,7 @@ class StreetCaptureService:
                     )
                     dest = self.output_dir / f"{job_id}_sv_{name}.jpg"
                     cv2.imwrite(str(dest), marked, [cv2.IMWRITE_JPEG_QUALITY, IMAGE_QUALITY])
-                    result[name] = str(dest)
+                    result[name] = str(dest.resolve())
                     logger.info(f"Street view saved: {dest.name}")
 
         return result
@@ -282,6 +283,32 @@ class StreetCaptureService:
         except Exception as e:
             logger.debug(f"UI hide skipped: {e}")
 
+    async def _dismiss_side_panel(self, page: Page) -> None:
+        """Hide the place-info side panel via CSS without interacting with it (interaction can exit panorama)."""
+        try:
+            await page.evaluate("""
+                () => {
+                    // Target the left-edge info panel by data attributes and known class fragments
+                    const patterns = [
+                        '[data-section-id]', '[data-feature-id]',
+                        '.app-viewcard-strip', '.place-page',
+                    ];
+                    patterns.forEach(sel => {
+                        try {
+                            document.querySelectorAll(sel).forEach(el => {
+                                const r = el.getBoundingClientRect();
+                                if (r.width > 80 && r.width < 600) {
+                                    el.style.setProperty('display', 'none', 'important');
+                                }
+                            });
+                        } catch(e) {}
+                    });
+                }
+            """)
+            logger.debug("Side panel CSS hide applied")
+        except Exception as e:
+            logger.debug(f"Side panel dismiss skipped: {e}")
+
     async def _wait_for_street_view(self, page: Page) -> None:
         try:
             await page.wait_for_selector("canvas", timeout=25_000)
@@ -297,7 +324,51 @@ class StreetCaptureService:
             logger.warning("Network idle timeout — proceeding anyway")
 
         await page.wait_for_timeout(INITIAL_WAIT_MS)
+        await self._dismiss_side_panel(page)
         await self._hide_ui_chrome(page)
+
+    async def _has_street_view_coverage(self, page: Page) -> bool:
+        """Returns True if real Street View photography is loaded (not a black no-coverage screen)."""
+        try:
+            png = await page.screenshot(full_page=False, type="png")
+            arr = np.array(Image.open(BytesIO(png)).convert("RGB"))
+            h, w = arr.shape[:2]
+            center = arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
+            mean_brightness = float(np.mean(center))
+            has_coverage = mean_brightness > 15.0
+            if not has_coverage:
+                logger.warning(f"No Street View coverage detected (dark screen, brightness={mean_brightness:.1f})")
+            return has_coverage
+        except Exception as e:
+            logger.debug(f"Coverage brightness check failed: {e}")
+            return True  # assume coverage if check fails
+
+    async def _find_nearby_coverage(
+        self, page: Page, lat: float, lon: float, heading: float
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Try ±100m and ±200m offsets in 4 cardinal directions to find nearest road with Street View."""
+        OFFSETS = [
+            (0.0009, 0.0),   # ~100m N
+            (-0.0009, 0.0),  # ~100m S
+            (0.0, 0.0009),   # ~100m E
+            (0.0, -0.0009),  # ~100m W
+            (0.0018, 0.0),   # ~200m N
+            (-0.0018, 0.0),  # ~200m S
+            (0.0, 0.0018),   # ~200m E
+            (0.0, -0.0018),  # ~200m W
+        ]
+        for dlat, dlon in OFFSETS:
+            nlat, nlon = lat + dlat, lon + dlon
+            url = _STREET_VIEW_URL.format(lat=nlat, lng=nlon, heading=int(heading % 360))
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                await self._wait_for_street_view(page)
+                if await self._has_street_view_coverage(page):
+                    logger.info(f"Fallback Street View found at offset ({dlat:+.4f},{dlon:+.4f})")
+                    return nlat, nlon
+            except Exception as e:
+                logger.debug(f"Fallback offset ({dlat:+.4f},{dlon:+.4f}) failed: {e}")
+        return None, None
 
     async def _get_canvas_clip(self, page: Page) -> Optional[Dict[str, int]]:
         try:
@@ -404,6 +475,13 @@ class StreetCaptureService:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             await self._wait_for_street_view(page)
+
+            if not await self._has_street_view_coverage(page):
+                found_lat, found_lon = await self._find_nearby_coverage(page, lat, lon, left_h)
+                if found_lat is None:
+                    logger.warning(f"No Street View coverage within ~200m of ({lat},{lon}) — skipping")
+                    return views  # finally block will close the page
+                lat, lon = found_lat, found_lon
 
             canvas_rect = await self._get_canvas_clip(page)
             if canvas_rect:

@@ -1,9 +1,12 @@
 version: "3.9"
 
 services:
+  # ── Backend ────────────────────────────────────────────────────────────────
   backend:
     build: ./backend
     container_name: pis_backend
+    # Port 8000 exposed for local debugging. Remove in production — Caddy is the
+    # only public entry point.
     ports:
       - "8000:8000"
     volumes:
@@ -14,19 +17,31 @@ services:
       - ARCGIS_API_KEY=${ARCGIS_API_KEY}
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=minicpm-v
+      - API_KEY=${API_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - DEBUG=${DEBUG:-false}
+      - MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS:-5}
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
 
+  # ── Frontend ───────────────────────────────────────────────────────────────
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Bakes the API key into the Vite bundle at build time.
+        VITE_API_KEY: ${API_KEY}
     container_name: pis_frontend
+    # Port 3000 exposed for local debugging. Remove in production.
     ports:
       - "3000:80"
     depends_on:
       - backend
     restart: unless-stopped
 
+  # ── Ollama (local AI) ──────────────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
     container_name: pis_ollama
@@ -35,6 +50,51 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  # One-shot container: pulls minicpm-v into the shared Ollama volume on first run.
+  # Runs after Ollama is healthy and exits immediately when done.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: pis_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: ["ollama", "pull", "minicpm-v"]
+    restart: "no"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # ── Caddy (HTTPS reverse proxy) ────────────────────────────────────────────
+  # Handles TLS automatically via Let's Encrypt when DOMAIN is a real hostname.
+  # For localhost, Caddy uses its built-in local CA (self-signed; trust once).
+  caddy:
+    image: caddy:2-alpine
+    container_name: pis_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3 (QUIC)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN:-localhost}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
 
 volumes:
   ollama_data:
+  caddy_data:
+  caddy_config:

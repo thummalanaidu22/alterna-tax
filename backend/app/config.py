@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     debug: bool = False
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
+    # Auth — set API_KEY in .env to require X-API-Key on all property endpoints.
+    # Leave blank to run in open/dev mode (no key required).
+    api_key: Optional[str] = None
+
     # Google Maps
     google_maps_api_key: Optional[str] = None
 
