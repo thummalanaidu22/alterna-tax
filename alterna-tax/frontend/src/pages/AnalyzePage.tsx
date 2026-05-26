@@ -140,7 +140,7 @@ export function AnalyzePage() {
           {job.status === "completed" && (
             <Card>
               <h3 className="text-sm font-semibold text-gray-300 mb-3">Captured Images</h3>
-              <ImageGallery jobId={job.job_id} />
+              <ImageGallery jobId={job.job_id} streetViewCount={job.street_view_count} />
             </Card>
           )}
 

@@ -396,17 +396,28 @@ class StreetCaptureService:
         await self._dismiss_side_panel(page)
         await self._hide_ui_chrome(page)
 
-    async def _has_street_view_coverage(self, page: Page) -> bool:
-        """Returns True if real Street View photography is loaded (not a black no-coverage screen)."""
-        try:
+    async def _has_street_view_coverage(self, page: Page, extra_wait_ms: int = 0) -> bool:
+        """Returns True if real Street View photography is loaded (not a black no-coverage screen).
+        If brightness=0 on first check, waits extra_wait_ms and retries once before returning False."""
+        async def _check() -> float:
             png = await page.screenshot(full_page=False, type="png")
             arr = np.array(Image.open(BytesIO(png)).convert("RGB"))
             h, w = arr.shape[:2]
             center = arr[h // 4 : 3 * h // 4, w // 4 : 3 * w // 4]
-            mean_brightness = float(np.mean(center))
-            has_coverage = mean_brightness > 15.0
+            return float(np.mean(center))
+
+        try:
+            brightness = await _check()
+
+            # Completely black — WebGL may not have finished painting. Retry once after extra wait.
+            if brightness == 0.0 and extra_wait_ms > 0:
+                logger.debug(f"Dark screen (brightness=0) — waiting {extra_wait_ms}ms before retry")
+                await page.wait_for_timeout(extra_wait_ms)
+                brightness = await _check()
+
+            has_coverage = brightness > 15.0
             if not has_coverage:
-                logger.warning(f"No Street View coverage detected (dark screen, brightness={mean_brightness:.1f})")
+                logger.warning(f"No Street View coverage detected (dark screen, brightness={brightness:.1f})")
             return has_coverage
         except Exception as e:
             logger.debug(f"Coverage brightness check failed: {e}")
@@ -545,7 +556,7 @@ class StreetCaptureService:
             await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             await self._wait_for_street_view(page)
 
-            if not await self._has_street_view_coverage(page):
+            if not await self._has_street_view_coverage(page, extra_wait_ms=3000):
                 found_lat, found_lon = await self._find_nearby_coverage(page, lat, lon, left_h)
                 if found_lat is None:
                     logger.warning(f"No Street View coverage within ~200m of ({lat},{lon}) — skipping")

@@ -3,6 +3,7 @@ import { X, ImageOff, Satellite, MapPin } from "lucide-react";
 
 interface ImageGalleryProps {
   jobId: string;
+  streetViewCount?: number;
 }
 
 const BACKEND = "http://localhost:8000";
@@ -55,13 +56,26 @@ function ImageTile({ label, src, icon, onOpen }: { label: string; src: string; i
   );
 }
 
-export function ImageGallery({ jobId }: ImageGalleryProps) {
+export function ImageGallery({ jobId, streetViewCount }: ImageGalleryProps) {
   const [lightbox, setLightbox] = useState<string | null>(null);
+
+  // Only render street view tiles when we know images were actually captured.
+  // streetViewCount undefined = old job or unknown → show all (may 404 gracefully).
+  const visibleImages = IMAGES.filter(({ key }) => {
+    if (key === "satellite") return true;
+    if (streetViewCount === 0) return false;
+    return true;
+  });
 
   return (
     <>
       <div className="grid grid-cols-2 gap-2">
-        {IMAGES.map(({ key, label, icon, path }) => (
+        {streetViewCount === 0 && (
+          <div className="col-span-2 text-xs text-gray-600 italic px-1 pb-1">
+            No Street View coverage found for this property
+          </div>
+        )}
+        {visibleImages.map(({ key, label, icon, path }) => (
           <ImageTile
             key={key}
             label={label}

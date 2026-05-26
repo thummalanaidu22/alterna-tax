@@ -231,6 +231,9 @@ class PropertyJob(BaseModel):
     updated_at: str
     error: Optional[str] = None
  
+    # Image capture metadata — used by frontend to avoid requesting missing files
+    street_view_count: int = 0             # number of street view images actually saved (0–3)
+
     # NEW — ground truth for accuracy measurement
     # Reviewers set this after manual inspection in Alterna (tag = OK-2026 or Kill-2026)
     human_verdict: Optional[str] = None    # "OK_2026" | "KILL_2026" | None (unreviewed)

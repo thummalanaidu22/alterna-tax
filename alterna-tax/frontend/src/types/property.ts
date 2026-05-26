@@ -58,6 +58,7 @@ export interface PropertyJob {
   created_at: string;
   updated_at: string;
   error?: string;
+  street_view_count?: number;
   human_verdict?: string;
   reviewer_notes?: string;
 }

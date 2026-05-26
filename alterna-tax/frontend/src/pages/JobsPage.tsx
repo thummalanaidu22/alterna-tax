@@ -114,7 +114,7 @@ export function JobsPage() {
               {selectedJob.status === "completed" && (
                 <Card>
                   <h3 className="text-sm font-semibold text-gray-300 mb-3">Images</h3>
-                  <ImageGallery jobId={selectedJob.job_id} />
+                  <ImageGallery jobId={selectedJob.job_id} streetViewCount={selectedJob.street_view_count} />
                 </Card>
               )}
 

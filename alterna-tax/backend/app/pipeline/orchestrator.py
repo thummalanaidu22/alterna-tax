@@ -168,6 +168,9 @@ class PipelineOrchestrator:
                 if isinstance(street_paths, Exception):
                     logger.warning("Street failed: %s", street_paths); street_paths = {}
 
+                # Record how many street view images were actually saved
+                job.street_view_count = sum(1 for v in (street_paths or {}).values() if v is not None)
+
                 vision_result = await self._run_stage(
                     job, "vision_analysis", self._stage_vision, satellite_path, street_paths
                 )
