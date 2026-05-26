@@ -2,7 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Upload, Plus, Trash2, PlayCircle, Download } from "lucide-react";
 import * as XLSX from "xlsx";
 import { useDispatch, useSelector } from "react-redux";
-import { useRef } from "react";
+import { useRef, useEffect } from "react";
 import { propertyApi } from "../services/api";
 import type { PropertyRequest } from "../types/property";
 import type { RootState } from "../store";
@@ -12,6 +12,7 @@ import {
   removeBatchRow,
   updateBatchRow,
   setBatchId,
+  upsertJob,
   type BatchRow,
 } from "../store/jobsSlice";
 import { Card } from "../components/ui/Card";
@@ -41,6 +42,11 @@ export function BatchPage() {
       return d.queued > 0 || d.processing > 0 ? 2000 : false;
     },
   });
+
+  // Push every batch job update into Redux so Dashboard and Jobs pages reflect them
+  useEffect(() => {
+    batchStatus?.jobs?.forEach((job) => dispatch(upsertJob(job)));
+  }, [batchStatus, dispatch]);
 
   const parseCSVRow = (text: string): string[][] => {
     const rows: string[][] = [];

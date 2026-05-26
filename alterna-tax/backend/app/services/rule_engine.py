@@ -26,8 +26,7 @@ _TINY_PARCEL_SQFT   = 800
 _MIN_BUILDABLE_SQFT = 2_000
 
 # Confidence below this → force NEEDS_HUMAN_REVIEW (per SOP reference in models)
-_LOW_CONFIDENCE_THRESHOLD = 0.80
-
+_LOW_CONFIDENCE_THRESHOLD = 0.75
 
 class RuleEngine:
     """
@@ -73,6 +72,19 @@ class RuleEngine:
         if not aerial_available:
             review_reasons.append("No aerial/satellite image available — manual review required")
         else:
+            # Vision service flagged a contradiction it could not auto-resolve
+            if vr.get("_force_human_review"):
+                review_reasons.append(vr.get("_review_reason", "Vision contradiction detected — manual review required"))
+
+            # Trust property_type over has_structure for vacant land parcels
+            if prop_type == PropertyType.VACANT_LAND and obs.has_structure:
+                logger.info("Rule engine override: vacant_land + has_structure=true → corrected to false")
+                obs.has_structure = False
+
+            # Structure detected but confidence is low — require aerial confirmation
+            if obs.has_structure and confidence < 0.80:
+                review_reasons.append("Structure detected but confidence is low — aerial confirmation needed")
+
             # Global banned-facility check (catches misclassified property types)
             banned_reasons = self._check_banned_facility_global(obs)
             rejection_reasons.extend(banned_reasons)

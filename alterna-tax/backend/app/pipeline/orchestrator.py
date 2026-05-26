@@ -44,15 +44,12 @@ class PipelineOrchestrator:
         self._semaphore = asyncio.Semaphore(5)
 
     async def startup(self) -> None:
-        """Load recent jobs from SQLite into memory on server start."""
-        rows = await db.list_jobs_from_db(limit=500)
-        for row in rows:
-            try:
-                job = PropertyJob(**row)
-                self._jobs[job.job_id] = job
-            except Exception as e:
-                logger.warning("Could not restore job %s from DB: %s", row.get("job_id"), e)
-        logger.info("Restored %d jobs from SQLite", len(rows))
+        """Start with a clean in-memory state on every server restart.
+        New jobs are still persisted to SQLite during the session.
+        """
+        self._jobs.clear()
+        self._batches.clear()
+        logger.info("Pipeline orchestrator ready — starting with clean state")
 
     # ── Public API ─────────────────────────────────────────────────────────────
 

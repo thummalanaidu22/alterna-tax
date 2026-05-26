@@ -24,6 +24,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -187,6 +189,68 @@ class StreetCaptureService:
                 logger.debug(f"OSM centroid lookup failed ({endpoint}): {e}")
         return None
 
+    # ── Street View metadata pre-check ────────────────────────────────────────
+
+    async def _check_street_view_available(self, lat: float, lng: float) -> bool:
+        """
+        Call the Street View Static Metadata API before launching Playwright.
+        Returns False (skip capture) when:
+          - Google has no imagery at this location (status != OK)
+          - The nearest pano is more than 50 m from the requested coordinates
+        This prevents passing a blank/distant road photo to the vision model.
+        """
+        if not settings.google_maps_api_key:
+            return True  # can't check without a key — proceed and let Playwright handle it
+        url = "https://maps.googleapis.com/maps/api/streetview/metadata"
+        params = {
+            "location": f"{lat},{lng}",
+            "key": settings.google_maps_api_key,
+            "radius": "50",  # only accept imagery within 50 m
+        }
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(url, params=params)
+                data = resp.json()
+
+            status = data.get("status", "")
+            if status == "REQUEST_DENIED":
+                # Metadata API key not authorized — Playwright uses full Google Maps (not Static API),
+                # so the key restriction doesn't block it. Proceed and let Playwright handle the capture.
+                logger.warning(
+                    "Street View Metadata API key not authorized (REQUEST_DENIED) — proceeding with Playwright anyway"
+                )
+                return True
+            if status in ("ZERO_RESULTS", "NOT_FOUND", "UNKNOWN_ERROR"):
+                logger.warning(
+                    "Street View metadata: no coverage within 50 m of (%.5f, %.5f) — status=%s, skipping",
+                    lat, lng, status,
+                )
+                return False
+            if status != "OK":
+                logger.warning(
+                    "Street View metadata unexpected status=%s for (%.5f, %.5f) — proceeding with Playwright",
+                    status, lat, lng,
+                )
+                return True
+
+            # Verify the returned pano is actually close to the requested point
+            loc = data.get("location", {})
+            pano_lat = float(loc.get("lat", lat))
+            pano_lng = float(loc.get("lng", lng))
+            dist_m = math.hypot((pano_lat - lat) * 111_320, (pano_lng - lng) * 111_320 * math.cos(math.radians(lat)))
+            if dist_m > 50:
+                logger.warning(
+                    "Street View pano is %.0f m away from requested coords — skipping (too far)", dist_m
+                )
+                return False
+
+            logger.info("Street View metadata OK — pano %.0f m away", dist_m)
+            return True
+
+        except Exception as e:
+            logger.debug("Street View metadata check failed: %s — proceeding anyway", e)
+            return True  # fail open: let Playwright decide
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     async def capture_all(
@@ -219,6 +283,11 @@ class StreetCaptureService:
             logger.info("No OSM centroid offset — using default heading 0°")
 
         logger.info(f"Street capture lat={lat} lon={lon} center_heading={center_heading:.1f}°")
+
+        # Pre-flight metadata check — skip Playwright entirely if no imagery within 50 m
+        if not await self._check_street_view_available(lat, lon):
+            logger.info("Street View skipped — no imagery within 50 m of (%.5f, %.5f)", lat, lon)
+            return {"center": None, "left": None, "right": None}
 
         async with self:
             views = await self._capture_three_views(lat, lon, center_heading, job_id)

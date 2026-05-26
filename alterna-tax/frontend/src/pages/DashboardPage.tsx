@@ -4,7 +4,7 @@ import { propertyApi } from "../services/api";
 import { Card } from "../components/ui/Card";
 import { StatusBadge } from "../components/ui/StatusBadge";
 import { DecisionBadge } from "../components/ui/DecisionBadge";
-import { Spinner } from "../components/ui/Spinner";
+import { useAppSelector } from "../store";
 import { formatDistanceToNow } from "date-fns";
 
 export function DashboardPage() {
@@ -14,11 +14,8 @@ export function DashboardPage() {
     refetchInterval: 15000,
   });
 
-  const { data: jobs = [], isLoading } = useQuery({
-    queryKey: ["jobs"],
-    queryFn: () => propertyApi.listJobs(100),
-    refetchInterval: 10000,
-  });
+  // Read jobs from Redux — resets to empty on every page refresh (no API fetch)
+  const jobs = useAppSelector((s) => s.jobs.recentJobs);
 
   const completed = jobs.filter((j) => j.status === "completed");
   const stats = {
@@ -130,9 +127,7 @@ export function DashboardPage() {
       {/* Recent jobs */}
       <Card>
         <h3 className="text-sm font-semibold text-gray-300 mb-4">Recent Jobs</h3>
-        {isLoading ? (
-          <div className="flex justify-center py-8"><Spinner /></div>
-        ) : recentJobs.length === 0 ? (
+        {recentJobs.length === 0 ? (
           <p className="text-sm text-gray-600 text-center py-8">No jobs yet. Run your first analysis.</p>
         ) : (
           <div className="space-y-2">

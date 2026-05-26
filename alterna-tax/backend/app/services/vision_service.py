@@ -55,7 +55,7 @@ Return ONLY valid JSON with no extra text or markdown fences:
   "heavily_wooded": false,
   "water_hole_on_land": false,
   "parcel_is_parking_only": false,
-  "has_structure": true,
+  "has_structure": false,
   "agri_has_house": false,
   "agri_fronts_road": false,
   "agri_shape_regular": false,
@@ -84,7 +84,7 @@ Field rules — read carefully:
 - heavily_wooded: true ONLY if the ENTIRE parcel is covered in dense trees with no cleared area visible.
 - water_hole_on_land: true ONLY for a small water-filled depression or saturated area INSIDE the parcel. Swimming pool=false. Pond next to parcel=false.
 - parcel_is_parking_only: true if aerial shows the parcel boundary contains ONLY a parking lot with no building footprint inside.
-- has_structure: true if any permanent building, house, or structure exists on the parcel.
+- has_structure: AERIAL Image 1 ONLY — look inside the RED boundary. Is there a building footprint (rooftop shape, rectangle, structure outline) visible INSIDE that boundary? true = yes, a clear structure footprint is inside the boundary. false = the land inside is open, grassy, wooded, paved, or unclear. DO NOT use Street Views to determine this field. A building visible in Street View that sits OUTSIDE the red boundary = false. Default = false. Only set true if you are certain from the aerial.
 - agri_has_house / agri_fronts_road / agri_shape_regular: fill these ONLY for agriculture parcels; set false for all others.
 - confidence: your certainty across ALL fields combined. Use this scale:
     0.96 = crystal-clear satellite + 2-3 street views; every field answered with certainty, no ambiguity at all
@@ -168,7 +168,7 @@ _RISK_FLAGS = [
 # Access/positive flags: only true when BOTH passes agree it's true
 _POSITIVE_FLAGS = ["has_road_access", "street_frontage", "lot_size_adequate", "has_structure"]
 
-_LOW_CONFIDENCE_THRESHOLD = 0.65
+_LOW_CONFIDENCE_THRESHOLD = 0.75
 
 # Flags eligible for targeted re-verification (only the ones prone to false positives)
 _VERIFY_FLAGS = [
@@ -420,9 +420,12 @@ class _VisionService:
         if prop_type == "agriculture":
             result["parcel_is_parking_only"] = False
 
-        # If model says commercial but also says it has no structure, likely mis-typed
+        # Commercial + no structure confirmed in aerial → do NOT silently assume parking.
+        # Flag for human review so the rule engine can decide correctly.
         if prop_type == "commercial" and not has_structure and not result.get("parcel_is_parking_only"):
-            result["parcel_is_parking_only"] = True
+            result["_force_human_review"] = True
+            result["_review_reason"] = "Commercial type detected but no structure confirmed in aerial — verify property type"
+            logger.info("Contradiction: commercial + no structure → flagged for human review")
 
         return result
 

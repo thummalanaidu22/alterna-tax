@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { propertyApi } from "../services/api";
+import { useAppSelector } from "../store";
 import type { PropertyJob } from "../types/property";
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN as string | undefined;
@@ -46,12 +45,8 @@ export function MapPage() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<PropertyJob | null>(null);
 
-  const { data: jobs = [] } = useQuery({
-    queryKey: ["jobs-map"],
-    queryFn: () => propertyApi.listJobs(500),
-    refetchInterval: 30_000,
-  });
-
+  // Read from Redux — clears on refresh, updates live as jobs complete
+  const jobs = useAppSelector((s) => s.jobs.recentJobs);
   const completedJobs = jobs.filter((j) => j.status === "completed" && j.result);
 
   // Initialise map

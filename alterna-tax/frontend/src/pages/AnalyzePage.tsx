@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { MapPin, Search } from "lucide-react";
 import { propertyApi } from "../services/api";
+import { useAppDispatch } from "../store";
+import { upsertJob } from "../store/jobsSlice";
 import { Card } from "../components/ui/Card";
 import { Spinner } from "../components/ui/Spinner";
 import { StatusBadge } from "../components/ui/StatusBadge";
@@ -10,6 +12,7 @@ import { PipelineProgress } from "../components/property/PipelineProgress";
 import { ImageGallery } from "../components/property/ImageGallery";
 
 export function AnalyzePage() {
+  const dispatch = useAppDispatch();
   const [lat, setLat] = useState("");
   const [lon, setLon] = useState("");
   const [propId, setPropId] = useState("");
@@ -19,6 +22,7 @@ export function AnalyzePage() {
     mutationFn: propertyApi.analyzeProperty,
     onSuccess: (job) => {
       setActiveJobId(job.job_id);
+      dispatch(upsertJob(job));
     },
   });
 
@@ -31,6 +35,11 @@ export function AnalyzePage() {
       return status === "queued" || status === "processing" ? 2000 : false;
     },
   });
+
+  // Push every job update into Redux so Dashboard and Jobs pages reflect it
+  useEffect(() => {
+    if (job) dispatch(upsertJob(job));
+  }, [job, dispatch]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
