@@ -231,6 +231,9 @@ class PropertyJob(BaseModel):
     updated_at: str
     error: Optional[str] = None
  
+    # Zoning/type hint from CSV — passed to vision model to improve classification accuracy
+    property_type_hint: Optional[str] = None
+
     # Image capture metadata — used by frontend to avoid requesting missing files
     street_view_count: int = 0             # number of street view images actually saved (0–3)
 

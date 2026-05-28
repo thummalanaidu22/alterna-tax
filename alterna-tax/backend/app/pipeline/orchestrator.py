@@ -153,16 +153,21 @@ class PipelineOrchestrator:
                 await self._update_job(job)
 
                 t0 = time.monotonic()
-                parcel, satellite_path, street_paths = await asyncio.gather(
-                    self._timed_stage(gis_stage, self._stage_gis(job)),
-                    self._timed_stage(sat_stage, self._stage_satellite_no_parcel(job)),
+
+                # Step 1: GIS first — we need the actual parcel polygon before satellite renders
+                try:
+                    parcel = await self._timed_stage(gis_stage, self._stage_gis(job))
+                except Exception as e:
+                    logger.warning("GIS failed: %s", e); parcel = None
+
+                # Step 2: Satellite + Street in parallel, satellite now gets the real parcel boundary
+                satellite_path, street_paths = await asyncio.gather(
+                    self._timed_stage(sat_stage, self._stage_satellite(job, parcel or {})),
                     self._timed_stage(str_stage, self._stage_street_no_parcel(job)),
                     return_exceptions=True,
                 )
-                logger.info("Parallel capture done in %dms", (time.monotonic() - t0) * 1000)
+                logger.info("Capture done in %dms", (time.monotonic() - t0) * 1000)
 
-                if isinstance(parcel, Exception):
-                    logger.warning("GIS failed: %s", parcel); parcel = None
                 if isinstance(satellite_path, Exception):
                     logger.warning("Satellite failed: %s", satellite_path); satellite_path = None
                 if isinstance(street_paths, Exception):
@@ -172,7 +177,8 @@ class PipelineOrchestrator:
                 job.street_view_count = sum(1 for v in (street_paths or {}).values() if v is not None)
 
                 vision_result = await self._run_stage(
-                    job, "vision_analysis", self._stage_vision, satellite_path, street_paths
+                    job, "vision_analysis", self._stage_vision,
+                    satellite_path, street_paths, job.property_type_hint
                 )
 
                 aerial_available = satellite_path is not None
@@ -221,17 +227,24 @@ class PipelineOrchestrator:
             raise
 
     async def _stage_gis(self, job: PropertyJob):
-        return await self.gis.get_parcel(job.latitude, job.longitude)
+        return await self.gis.get_parcel(
+            job.latitude, job.longitude,
+            property_type_hint=job.property_type_hint or ""
+        )
 
     async def _stage_satellite_no_parcel(self, job: PropertyJob):
         return await self.satellite.capture(job.latitude, job.longitude, {}, job.job_id)
+
+    async def _stage_satellite(self, job: PropertyJob, parcel: dict):
+        """Satellite capture with the real GIS parcel polygon for accurate boundary overlay."""
+        return await self.satellite.capture(job.latitude, job.longitude, parcel, job.job_id)
 
     async def _stage_street_no_parcel(self, job: PropertyJob):
         svc = StreetCaptureService()
         return await svc.capture_all(job.latitude, job.longitude, job.job_id)
 
-    async def _stage_vision(self, satellite_path, street_paths):
-        return await self.vision.analyze(satellite_path, street_paths or {})
+    async def _stage_vision(self, satellite_path, street_paths, property_type_hint=None):
+        return await self.vision.analyze(satellite_path, street_paths or {}, property_type_hint=property_type_hint)
 
     async def _stage_rules(self, vision_result, parcel):
         return self.rule_engine.evaluate(vision_result, parcel)

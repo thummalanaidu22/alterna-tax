@@ -18,18 +18,33 @@ class GISService:
     REGRID_API = "https://app.regrid.com/api/v1/parcel"
     ARCGIS_SAMPLE = "https://services.arcgis.com"
 
-    async def get_parcel(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    async def get_parcel(self, lat: float, lon: float, property_type_hint: str = "") -> Optional[Dict[str, Any]]:
         """
         Attempts parcel lookup in order:
-        1. Regrid (nationwide coverage)
-        2. FCC Area API fallback for basic boundary estimation
+        1. Regrid (nationwide coverage, requires paid API key)
+        2. OSM landuse/plot polygon — free, no API key, surprisingly accurate
+        3. Auto-detect property type from OSM context, then use type-aware estimate
         """
         parcel = await self._fetch_regrid(lat, lon)
         if parcel:
+            logger.info("Parcel boundary from Regrid API")
             return parcel
 
-        logger.warning(f"Regrid failed for ({lat},{lon}), using estimated boundary")
-        return self._create_estimated_parcel(lat, lon)
+        parcel = await self._fetch_osm_plot(lat, lon)
+        if parcel:
+            logger.info("Parcel boundary from OSM landuse query")
+            return parcel
+
+        # No real boundary available — detect property type from OSM context so the
+        # estimated box is the right size for this specific property
+        detected_type = hint = (property_type_hint or "").lower()
+        if not detected_type:
+            detected_type = await self._detect_type_from_osm(lat, lon)
+            if detected_type:
+                logger.info(f"OSM context detected property type: {detected_type}")
+
+        logger.warning(f"All parcel sources failed for ({lat},{lon}) — using {detected_type or 'default'} estimate")
+        return self._create_estimated_parcel(lat, lon, detected_type)
 
     async def _fetch_regrid(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
         try:
@@ -64,10 +79,161 @@ class GISService:
             "properties": props,
         }
 
-    def _create_estimated_parcel(self, lat: float, lon: float) -> Dict[str, Any]:
-        """Creates a ~100x100ft estimated parcel centered on coords."""
-        delta_lat = 0.00045
-        delta_lon = 0.00055
+    async def _detect_type_from_osm(self, lat: float, lon: float) -> str:
+        """
+        Query OSM tags within 150m to auto-detect property type when no hint is given.
+        Returns one of: 'residential', 'commercial', 'agriculture', 'vacant', or ''
+        """
+        query = (
+            f"[out:json][timeout:10];"
+            f"("
+            f"  way[\"landuse\"](around:150,{lat},{lon});"
+            f"  way[\"building\"](around:80,{lat},{lon});"
+            f"  way[\"amenity\"](around:80,{lat},{lon});"
+            f"  way[\"shop\"](around:80,{lat},{lon});"
+            f"  way[\"natural\"=\"wood\"](around:150,{lat},{lon});"
+            f"  way[\"natural\"=\"scrub\"](around:150,{lat},{lon});"
+            f");"
+            f"out tags;"
+        )
+        overpass_endpoints = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+        ]
+
+        _COMMERCIAL_LANDUSE = {"commercial", "retail", "industrial", "office", "warehouse"}
+        _AGRI_LANDUSE = {"farmland", "farmyard", "farm", "orchard", "vineyard",
+                         "meadow", "grass", "pasture", "forest", "wood"}
+        _RESI_LANDUSE = {"residential", "housing"}
+
+        for endpoint in overpass_endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=12) as client:
+                    resp = await client.post(endpoint, data={"data": query})
+                    resp.raise_for_status()
+                    elements = resp.json().get("elements", [])
+
+                scores = {"commercial": 0, "agriculture": 0, "residential": 0, "vacant": 0}
+                for el in elements:
+                    tags = el.get("tags", {})
+                    landuse = tags.get("landuse", "").lower()
+                    building = tags.get("building", "").lower()
+                    amenity  = tags.get("amenity", "").lower()
+                    shop     = tags.get("shop", "").lower()
+                    natural  = tags.get("natural", "").lower()
+
+                    if landuse in _COMMERCIAL_LANDUSE or amenity or shop:
+                        scores["commercial"] += 2
+                    elif landuse in _AGRI_LANDUSE or natural in ("wood", "scrub", "grassland", "heath"):
+                        scores["agriculture"] += 2
+                    elif landuse in _RESI_LANDUSE or building in ("house", "residential", "detached", "apartments"):
+                        scores["residential"] += 2
+                    elif building:
+                        scores["commercial"] += 1  # unknown building → assume commercial
+
+                if not any(scores.values()):
+                    # Nothing found nearby — likely rural vacant/agriculture
+                    return "agriculture"
+
+                best = max(scores, key=lambda k: scores[k])
+                if scores[best] == 0:
+                    return ""
+                logger.debug(f"OSM type scores: {scores} → {best}")
+                return best
+
+            except Exception as e:
+                logger.debug(f"OSM type detection failed ({endpoint}): {e}")
+                continue
+        return ""
+
+    async def _fetch_osm_plot(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
+        """
+        Query OSM Overpass for the landuse/plot polygon containing this point.
+        Returns the smallest matching polygon (most specific to this property).
+        Free — no API key required.
+        """
+        # is_in query: find all OSM areas that contain the point, filter to land-related ones
+        query = (
+            f"[out:json][timeout:12];"
+            f"is_in({lat},{lon})->.a;"
+            f"(way(pivot.a)[landuse];"
+            f"way(pivot.a)[\"building\"];"
+            f"way(pivot.a)[\"boundary\"=\"parcel\"];"
+            f");"
+            f"out body;>;out skel qt;"
+        )
+        overpass_endpoints = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+        ]
+        for endpoint in overpass_endpoints:
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(endpoint, data={"data": query})
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                nodes = {n["id"]: (n["lon"], n["lat"])
+                         for n in data.get("elements", []) if n["type"] == "node"}
+                ways = [e for e in data.get("elements", []) if e["type"] == "way"]
+                if not ways:
+                    continue
+
+                # Build polygons and pick the smallest one (most specific to this property)
+                candidates = []
+                for way in ways:
+                    pts = [nodes[nid] for nid in way.get("nodes", []) if nid in nodes]
+                    if len(pts) < 3:
+                        continue
+                    try:
+                        poly = Polygon(pts)
+                        if poly.is_valid and poly.area > 0:
+                            candidates.append(poly)
+                    except Exception:
+                        continue
+
+                if not candidates:
+                    continue
+
+                # Smallest valid polygon = most specific parcel
+                best = min(candidates, key=lambda p: p.area)
+                geom = mapping(best)
+                area_sqft = self._calc_area_sqft(best)
+                logger.info(f"OSM plot polygon: {area_sqft:,.0f} sqft via {endpoint}")
+                return {
+                    "geometry": geom,
+                    "polygon": best,
+                    "bbox": list(best.bounds),
+                    "centroid": [best.centroid.x, best.centroid.y],
+                    "area_sqft": area_sqft,
+                    "properties": {"source": "osm_landuse"},
+                }
+            except Exception as e:
+                logger.debug(f"OSM plot query failed ({endpoint}): {e}")
+                continue
+        return None
+
+    def _create_estimated_parcel(self, lat: float, lon: float, property_type_hint: str = "") -> Dict[str, Any]:
+        """
+        Last-resort estimated parcel. Size varies by property type so the red boundary
+        shown in the satellite image actually reflects the typical parcel size.
+        """
+        hint = (property_type_hint or "").lower()
+
+        # Typical parcel sizes by type (half-side in degrees)
+        # lat: 1 deg ≈ 111,320m  |  lon: 1 deg ≈ 111,320 * cos(lat) m (≈ 97,000m at 28°N)
+        if "agri" in hint or "farm" in hint or "ranch" in hint or "grove" in hint:
+            # Agriculture: ~5 acres = ~465m × 465m
+            delta_lat, delta_lon = 0.00209, 0.00240
+        elif "commercial" in hint or "retail" in hint or "office" in hint or "industrial" in hint:
+            # Commercial: ~200ft × 300ft
+            delta_lat, delta_lon = 0.000275, 0.000309
+        elif "vacant" in hint or "unimproved" in hint or "land" in hint:
+            # Vacant land: ~150ft × 150ft
+            delta_lat, delta_lon = 0.000206, 0.000232
+        else:
+            # Residential default: ~80ft × 100ft typical Florida lot
+            delta_lat, delta_lon = 0.000110, 0.000124
 
         coords = [
             [lon - delta_lon, lat - delta_lat],
@@ -78,13 +244,15 @@ class GISService:
         ]
         geom = {"type": "Polygon", "coordinates": [coords]}
         polygon = Polygon([(c[0], c[1]) for c in coords[:-1]])
+        area_sqft = self._calc_area_sqft(polygon)
+        logger.info(f"Estimated parcel ({hint or 'residential'}): {area_sqft:,.0f} sqft")
 
         return {
             "geometry": geom,
             "polygon": polygon,
             "bbox": list(polygon.bounds),
             "centroid": [lon, lat],
-            "area_sqft": self._calc_area_sqft(polygon),
+            "area_sqft": area_sqft,
             "properties": {"estimated": True},
         }
 

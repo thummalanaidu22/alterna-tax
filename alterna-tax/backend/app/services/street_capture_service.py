@@ -47,12 +47,12 @@ logger = logging.getLogger(__name__)
 SIDE_OFFSET_DEG: int = 35          # ± degrees from center heading for left/right
 FOV: int = 90                       # Google Maps Street View horizontal FOV
 VIEWPORT: Dict[str, int] = {"width": 1280, "height": 720}
-INITIAL_WAIT_MS: int = 4500         # wait after networkidle for WebGL painting
-STAB_WAIT_MS: int = 900             # fixed post-drag settle wait
-STAB_TIMEOUT_MS: int = 3500         # max additional stability check window
+INITIAL_WAIT_MS: int = 3000         # wait after networkidle for WebGL painting (was 4500)
+STAB_WAIT_MS: int = 600             # fixed post-drag settle wait (was 900)
+STAB_TIMEOUT_MS: int = 2500         # max additional stability check window (was 3500)
 STAB_DIFF_THRESHOLD: float = 1.5    # mean pixel diff below which frame is stable
-RETRY_COUNT: int = 3
-RETRY_DELAY_MS: int = 2500
+RETRY_COUNT: int = 2                # screenshot retries per view (was 3)
+RETRY_DELAY_MS: int = 1500          # delay between retries (was 2500)
 IMAGE_QUALITY: int = 85
 
 _STREET_VIEW_URL = (
@@ -556,7 +556,7 @@ class StreetCaptureService:
             await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
             await self._wait_for_street_view(page)
 
-            if not await self._has_street_view_coverage(page, extra_wait_ms=3000):
+            if not await self._has_street_view_coverage(page, extra_wait_ms=2000):
                 found_lat, found_lon = await self._find_nearby_coverage(page, lat, lon, left_h)
                 if found_lat is None:
                     logger.warning(f"No Street View coverage within ~200m of ({lat},{lon}) — skipping")

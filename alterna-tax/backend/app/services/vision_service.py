@@ -26,22 +26,31 @@ ANALYSIS_PROMPT = """You are analyzing a property for a real estate investment f
 - Image 1: Aerial/satellite view. The RED boundary outlines the exact parcel to evaluate.
 - Images 2-4: Street-level photos of the same property from different angles (left, center, right).
 
-REASONING APPROACH — follow this sequence before filling each field:
-  1. Aerial first: trace the red boundary, identify lot shape, size, and whether any structure footprint sits inside it.
-  2. Street views: confirm structure type and physical condition.
-  3. Cross-check: do aerial and street views agree on property type and condition?
-  4. Only then fill in the JSON fields below.
+STEP 1 — DETERMINE PROPERTY TYPE FIRST (most important field):
+Look at the aerial and street views carefully. Ask yourself:
+  A) Is there a house / townhouse / duplex / condo unit inside the boundary? → "residential"
+  B) Is it a store, office, restaurant, strip mall, warehouse, clinic, hotel, apartment complex? → "commercial"
+  C) Is the parcel empty land with NO structure — just grass, dirt, trees, or pavement? → "vacant_land"
+  D) Is it farmland, grove, ranch, pasture, timberland — large open land used for farming? → "agriculture"
+  E) Is the structure clearly a manufactured/mobile home on a chassis or blocks? → "mobile_home"
+  F) Is it a factory, warehouse, industrial facility, self-storage, auto yard? → "industrial"
+  G) Cannot tell at all? → "unknown"
 
-Focus ONLY on the property inside the red boundary — ignore neighboring parcels.
+CRITICAL: Do NOT default to "residential". Look at what is actually there.
+  - Empty grass lot with no building = "vacant_land", NOT residential
+  - Farm fields, groves, pastures = "agriculture", NOT residential
+  - Stores, offices, warehouses = "commercial", NOT residential
+  - Mobile/manufactured home = "mobile_home", NOT residential
 
-Return ONLY valid JSON with no extra text or markdown fences:
+STEP 2 — Fill in the full JSON. Return ONLY valid JSON, no markdown fences:
 {
-  "property_type": "residential",
+  "property_type": "unknown",
   "damaged_or_burned": false,
   "plywood_on_windows": false,
   "heavy_garbage_debris": false,
   "vacancy_signs": false,
   "mobile_home": false,
+  "hurricane_shutters": false,
   "under_construction": false,
   "religious_building_type": "none",
   "commercial_reject_type": "none",
@@ -60,63 +69,65 @@ Return ONLY valid JSON with no extra text or markdown fences:
   "agri_fronts_road": false,
   "agri_shape_regular": false,
   "confidence": 0.88,
-  "notes": "one sentence describing what you see"
+  "notes": "one sentence describing what you see inside the red boundary"
 }
 
-Field rules — read carefully:
-- property_type: "residential" / "commercial" / "vacant_land" / "agriculture" / "mobile_home" / "industrial" / "unknown"
-  * Use street views to confirm: a house=residential, strip mall=commercial, empty lot=vacant_land
+Field rules:
+- property_type: MUST be one of: "residential" / "commercial" / "vacant_land" / "agriculture" / "mobile_home" / "industrial" / "unknown"
+  Visual cues by type:
+    residential  → pitched roof house, single/multi-family home, townhouse, condo, duplex
+    commercial   → flat-roof building, storefront, parking lot with business, office, warehouse, apartment complex (5+ units)
+    vacant_land  → empty lot, cleared land, raw land, grassy parcel, no structure visible inside boundary
+    agriculture  → farm rows, grove trees in rows, pasture/grazing land, ranch, greenhouse, large open rural land
+    mobile_home  → rectangular metal/vinyl structure on chassis, visible skirting, not a site-built foundation
+    industrial   → large metal building, loading docks, outdoor storage yard, self-storage facility
 - damaged_or_burned: true ONLY if structure shows collapse, burn marks, fire damage, or partial demolition. Normal wear=false.
-- plywood_on_windows: true ONLY for raw WOOD boards nailed over window openings. Aluminum hurricane shutters=false. Blinds=false.
-- heavy_garbage_debris: true ONLY if you can clearly see MAN-MADE waste: trash bags, junk/abandoned cars, appliances, construction rubble, or garbage piles covering the property. Overgrown grass=false. Trees=false. Bushes=false. Weeds=false. Natural vegetation of any kind=false. Only visible human-generated waste counts.
-- vacancy_signs: true ONLY if a structure EXISTS on the parcel AND shows multiple neglect signs simultaneously: boarded windows + overgrown lawn + no activity. A vacant lot with no structure=false (it is land, not a vacant building). One sign alone=false.
-- mobile_home: true if structure is clearly a prefabricated mobile/manufactured home on wheels or blocks, NOT a site-built house.
-- under_construction: true ONLY if exposed framing, missing roof sections, scaffolding, no exterior finish visible.
-- religious_building_type: "church" / "synagogue" / "mosque" / "temple" / "none" — only if you can clearly identify it
-- commercial_reject_type: "gas_station" / "auto_repair" / "none" — gas canopies, pumps=gas_station; lift bays, tire racks=auto_repair
-- hospital: true ONLY for a large multi-story hospital with ER/medical complex. A small clinic or doctor office=false.
-- k12_school: true ONLY for a K-12 school campus with playground, portables, or large parking. Preschool/daycare=false.
-- has_road_access: false ONLY if parcel is completely surrounded by other parcels with NO touching road or driveway.
-- street_frontage: false ONLY if the parcel is a rear lot or alley lot with zero frontage on a public street.
-- side_lot: true ONLY if lot is a narrow sliver strip (like a driveway width) with no buildable frontage.
-- triangle_lot: true ONLY if the aerial shows a clearly triangular wedge-shaped lot.
-- lot_size_adequate: false if the parcel is visibly much smaller than neighboring lots and appears unbuildable.
-- heavily_wooded: true ONLY if the ENTIRE parcel is covered in dense trees with no cleared area visible.
-- water_hole_on_land: true ONLY for a small water-filled depression or saturated area INSIDE the parcel. Swimming pool=false. Pond next to parcel=false.
-- parcel_is_parking_only: true if aerial shows the parcel boundary contains ONLY a parking lot with no building footprint inside.
-- has_structure: AERIAL Image 1 ONLY — look inside the RED boundary. Is there a building footprint (rooftop shape, rectangle, structure outline) visible INSIDE that boundary? true = yes, a clear structure footprint is inside the boundary. false = the land inside is open, grassy, wooded, paved, or unclear. DO NOT use Street Views to determine this field. A building visible in Street View that sits OUTSIDE the red boundary = false. Default = false. Only set true if you are certain from the aerial.
-- agri_has_house / agri_fronts_road / agri_shape_regular: fill these ONLY for agriculture parcels; set false for all others.
-- confidence: your certainty across ALL fields combined. Use this scale:
-    0.96 = crystal-clear satellite + 2-3 street views; every field answered with certainty, no ambiguity at all
-    0.92 = clear satellite + at least 1 clear street view; property type, condition and lot shape all clearly identified
-    0.87 = one image partially obstructed but all critical features still identifiable
-    0.75 = genuine uncertainty on 1-2 fields; one image missing or significantly blurry
-    0.62 = only satellite available OR street views completely missed the property
-    0.45 = cannot determine property type or condition from available images
-  IMPORTANT RULES for confidence:
-    * Good daylight images where you can clearly see the property type AND answer all boolean fields → set confidence >= 0.92
-    * If satellite clearly shows the parcel boundary AND at least 1 street view confirms the property → set confidence >= 0.92
-    * If you answered ALL boolean fields confidently without guessing → add 0.03 to your score
-    * Do NOT default to 0.75 or 0.88 out of habit — most clear daytime images deserve 0.92 or higher
-    * Only go below 0.80 if images are genuinely unclear, night-time, or heavily obstructed"""
+- plywood_on_windows: true ONLY for raw WOOD boards nailed over window openings. Hurricane shutters=false. Blinds=false.
+- heavy_garbage_debris: true ONLY if clearly visible MAN-MADE waste: trash bags, junk cars, appliances, rubble piles. Grass/trees/weeds/bushes=false. Natural vegetation=false.
+- vacancy_signs: true ONLY if a structure EXISTS AND shows boarded windows + overgrown + no activity ALL together. Vacant lot with no building=false.
+- mobile_home: true if clearly a prefabricated manufactured home on blocks/chassis, not a site-built house.
+- hurricane_shutters: true if windows/doors are covered by ALUMINUM or METAL accordion/roll-down storm shutters. These are NOT boards — they are metallic, uniform, and fitted to the window frame. false for plywood boards, false for open windows.
+- under_construction: true ONLY if exposed framing, missing roof, scaffolding, no exterior finish.
+- religious_building_type: "church" / "synagogue" / "mosque" / "temple" / "none"
+- commercial_reject_type: "gas_station" / "auto_repair" / "none"
+- hospital: true ONLY for large multi-story hospital/ER complex. Small clinic=false.
+- k12_school: true ONLY for K-12 campus with playground/portables. Preschool/daycare=false.
+- has_road_access: false ONLY if completely landlocked with zero road or driveway touching.
+- street_frontage: false ONLY if rear/alley lot with zero public street frontage.
+- side_lot: true ONLY if narrow sliver strip with no buildable width.
+- triangle_lot: true ONLY if aerial shows a clearly triangular wedge shape.
+- lot_size_adequate: false if visibly much smaller than all neighboring lots and unbuildable.
+- heavily_wooded: true ONLY if the ENTIRE parcel is dense trees with zero cleared area.
+- water_hole_on_land: true ONLY for water-filled depression or wet area INSIDE parcel. Pool=false. Adjacent pond=false.
+- parcel_is_parking_only: true if aerial shows the boundary contains ONLY a parking lot with no building.
+- has_structure: AERIAL Image 1 ONLY — is there a building footprint (roof shape, rectangle) INSIDE the RED boundary? Default=false. Only true if certain from aerial.
+- agri_has_house / agri_fronts_road / agri_shape_regular: agriculture parcels ONLY — set false for all other types.
+- confidence: 0.96=crystal clear all fields certain / 0.92=clear images type confirmed / 0.87=minor obstruction / 0.75=uncertainty on 1-2 fields / 0.62=satellite only / 0.45=cannot determine type
+  * Clear daytime images where type is obvious → use 0.92 or higher. Do NOT default to 0.75 or 0.88."""
 
 # ── Second-pass prompt (focused re-analysis for low confidence) ───────────────
 
 SECOND_PASS_PROMPT = """Review these property images again. Your previous analysis had low confidence ({prev_conf:.0%}).
 
-Look very carefully at:
-1. The aerial — trace the RED boundary to find the exact parcel edges
-2. Street views — confirm the structure type and physical condition
+STEP 1 — Re-determine the property type. Look at the aerial and street views:
+  - Empty lot, grass, raw land, no building inside boundary → "vacant_land"
+  - Farm rows, grove, pasture, rural land → "agriculture"
+  - Mobile/manufactured home on chassis/blocks → "mobile_home"
+  - Store, office, warehouse, apartment complex → "commercial"
+  - Factory, industrial building, storage yard → "industrial"
+  - Single/multi-family house, condo, townhouse → "residential"
+  - Cannot determine → "unknown"
+Do NOT default to "residential". Use what you actually see.
 
-CRITICAL RULES before answering:
-- heavy_garbage_debris: ONLY man-made waste (trash bags, junk cars, appliances, rubble). Grass/trees/weeds/bushes = false.
-- vacancy_signs: ONLY if a STRUCTURE exists AND shows boarded windows + overgrown + no activity together. Vacant land with no building = false.
-- has_structure: true only if a permanent building/house is visible inside the RED boundary.
+CRITICAL RULES:
+- heavy_garbage_debris: ONLY man-made waste (trash bags, junk cars, appliances, rubble). Grass/trees/weeds = false.
+- vacancy_signs: ONLY if a STRUCTURE exists AND shows boarded windows + overgrown + no activity together. Vacant land = false.
+- has_structure: true only if a permanent building footprint is inside the RED boundary on the aerial.
 
-Return ONLY valid JSON with your best updated assessment:
+Return ONLY valid JSON:
 {
-  "property_type": "residential|commercial|vacant_land|agriculture|mobile_home|industrial|unknown",
-  "has_structure": true,
+  "property_type": "unknown",
+  "has_structure": false,
   "damaged_or_burned": false,
   "plywood_on_windows": false,
   "heavy_garbage_debris": false,
@@ -126,13 +137,8 @@ Return ONLY valid JSON with your best updated assessment:
   "heavily_wooded": false,
   "water_hole_on_land": false,
   "confidence": 0.80,
-  "notes": "clear description of what you see"
-}
-
-CONFIDENCE RULES:
-- Parcel boundary and property type clearly visible: >= 0.80
-- Structure condition identifiable: >= 0.75
-- Only go below 0.65 if images are genuinely unusable"""
+  "notes": "clear description of what you see inside the red boundary"
+}"""
 
 # ── Targeted risk-flag verification prompt ────────────────────────────────────
 
@@ -170,11 +176,12 @@ _POSITIVE_FLAGS = ["has_road_access", "street_frontage", "lot_size_adequate", "h
 
 _LOW_CONFIDENCE_THRESHOLD = 0.75
 
-# Flags eligible for targeted re-verification (only the ones prone to false positives)
+# Flags eligible for targeted re-verification.
+# Only include flags that are (a) prone to false positives AND (b) cause outright rejection.
+# Minor/borderline flags (side_lot, triangle_lot, heavily_wooded) are deterministic enough
+# from the aerial — skipping verification for them saves one full Ollama round-trip each.
 _VERIFY_FLAGS = [
-    "heavy_garbage_debris", "damaged_or_burned", "plywood_on_windows",
-    "vacancy_signs", "mobile_home", "under_construction",
-    "side_lot", "triangle_lot", "heavily_wooded", "water_hole_on_land",
+    "heavy_garbage_debris", "damaged_or_burned", "plywood_on_windows", "vacancy_signs",
 ]
 
 
@@ -188,14 +195,26 @@ class _VisionService:
         self,
         satellite_path: Optional[str],
         street_paths: Dict[str, Optional[str]],
+        property_type_hint: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         images_b64 = self._load_images(satellite_path, street_paths)
         if not images_b64:
             logger.error("No images available for vision analysis")
             return {"_no_images": True}
 
+        # Build prompt — prepend type hint when available so the model has context
+        prompt = ANALYSIS_PROMPT
+        if property_type_hint:
+            hint_clean = property_type_hint.strip().lower()
+            prompt = (
+                f"ZONING HINT FROM COUNTY RECORDS: This parcel is recorded as '{hint_clean}'. "
+                f"Use this as strong prior evidence for property_type, but override it if the images clearly show something different.\n\n"
+                + prompt
+            )
+            logger.info("Vision analysis: property_type_hint='%s'", hint_clean)
+
         # Pass 1 — primary analysis
-        result = await self._call_model(ANALYSIS_PROMPT, images_b64, temperature=0.1)
+        result = await self._call_model(prompt, images_b64, temperature=0.1)
         if result is None:
             return None
 
@@ -298,7 +317,8 @@ class _VisionService:
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9,
-                "num_predict": 1024,
+                "num_predict": 600,   # JSON output rarely exceeds 400 tokens (was 1024)
+                "num_ctx": 4096,      # explicit context window — prevents model auto-sizing large
             },
         }
         logger.info("Sending %d images to %s (temp=%.1f)", len(images_b64), self.model, temperature)
@@ -323,10 +343,10 @@ class _VisionService:
 
         images: List[str] = []
         candidates = [
-            (satellite_path,             1280, 1.7),  # larger + sharper satellite
-            (street_paths.get("center"), 960,  1.5),
-            (street_paths.get("left"),   960,  1.5),
-            (street_paths.get("right"),  960,  1.5),
+            (satellite_path,             1024, 1.7),  # satellite — 1024px is sufficient for detail
+            (street_paths.get("center"), 768,  1.5),  # street views — 768px saves ~35% payload
+            (street_paths.get("left"),   768,  1.5),
+            (street_paths.get("right"),  768,  1.5),
         ]
         for path, max_px, sharpen in candidates:
             if not path:

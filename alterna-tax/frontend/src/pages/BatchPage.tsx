@@ -1,8 +1,8 @@
+import { useState, useRef, useEffect } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Upload, Plus, Trash2, PlayCircle, Download } from "lucide-react";
 import * as XLSX from "xlsx";
 import { useDispatch, useSelector } from "react-redux";
-import { useRef, useEffect } from "react";
 import { propertyApi } from "../services/api";
 import type { PropertyRequest } from "../types/property";
 import type { RootState } from "../store";
@@ -25,6 +25,8 @@ export function BatchPage() {
   const rows = useSelector((s: RootState) => s.jobs.batchRows);
   const batchId = useSelector((s: RootState) => s.jobs.batchId);
   const submittingRef = useRef(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [csvError, setCsvError] = useState<string | null>(null);
 
   const submitMutation = useMutation({
     mutationFn: propertyApi.analyzeBatch,
@@ -77,28 +79,93 @@ export function BatchPage() {
 
   const handleCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Always reset the input so the same file (or a new file) can be uploaded again
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setCsvError(null);
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = (ev) => {
       const text = ev.target?.result as string;
       const parsed = parseCSVRow(text);
-      if (parsed.length < 2) return;
 
-      const headers = parsed[0].map((h) => h.toLowerCase().trim());
-      const latIdx = headers.findIndex((h) => h === "latitude");
-      const lngIdx = headers.findIndex((h) => h === "longitude");
-      const mapIdx = headers.findIndex((h) => h === "googlemap");
-      const propIdIdx = headers.findIndex((h) => ["parcelid", "propertyappraiserformat", "property_id", "id"].includes(h));
+      if (parsed.length < 2) {
+        setCsvError("CSV has no data rows. Make sure the file has a header row and at least one property row.");
+        return;
+      }
 
-      const newRows: BatchRow[] = parsed
-        .slice(1)
+      const headers = parsed[0].map((h) => h.toLowerCase().trim().replace(/\s+/g, ""));
+      const dataRows = parsed.slice(1).filter((r) => r.some((c) => c.trim().length > 0));
+
+      // ── Step 1: find columns by header name ──────────────────────────────────
+      let latIdx = headers.findIndex((h) =>
+        ["latitude", "lat", "y", "ycoord", "ylat", "lat."].includes(h)
+      );
+      let lngIdx = headers.findIndex((h) =>
+        ["longitude", "long", "lng", "lon", "x", "xcoord", "xlong", "long.", "lng."].includes(h)
+      );
+      const mapIdx = headers.findIndex((h) =>
+        ["googlemap", "googlemaplink", "maplink", "map", "link", "url", "googleurl",
+         "googlemaplink", "streetviewlink"].includes(h.replace(/\s+/g, ""))
+      );
+      const propIdIdx = headers.findIndex((h) =>
+        ["parcelid", "propertyappraiserformat", "property_id", "propertyid",
+         "id", "pid", "apn", "folio", "accountnumber", "parcelnumber"].includes(h)
+      );
+
+      // ── Step 2: if header names didn't match, auto-detect by scanning values ─
+      // Handles CSVs with generic headers like column_1, column_2 (e.g. Alterna exports)
+      if (latIdx < 0 || lngIdx < 0) {
+        const sampleRows = dataRows.slice(0, 10);
+        const isLat  = (v: string) => { const n = parseFloat(v); return !isNaN(n) && n >= 24.0 && n <= 31.5; };
+        const isLng  = (v: string) => { const n = parseFloat(v); return !isNaN(n) && n >= -87.7 && n <= -79.9; };
+        const isMapLink = (v: string) => v.includes("google.com/maps") || v.includes("maps.app.goo");
+
+        for (let col = 0; col < headers.length; col++) {
+          const vals = sampleRows.map((r) => (r[col] ?? "").trim()).filter(Boolean);
+          if (vals.length === 0) continue;
+          if (latIdx < 0 && vals.every(isLat))  latIdx = col;
+          if (lngIdx < 0 && vals.every(isLng))  lngIdx = col;
+          if (mapIdx < 0 && vals.some(isMapLink)) {
+            // mapIdx is const so handle via separate mutable
+          }
+        }
+      }
+
+      const extractLatLng = (mapCell: string): { lat: string; lng: string } => {
+        if (!mapCell) return { lat: "", lng: "" };
+        let m = mapCell.match(/[?&]query=(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+        if (m) return { lat: m[1], lng: m[2] };
+        m = mapCell.match(/@(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+        if (m) return { lat: m[1], lng: m[2] };
+        m = mapCell.match(/ll=(-?\d+\.?\d*),\s*(-?\d+\.?\d*)/);
+        if (m) return { lat: m[1], lng: m[2] };
+        m = mapCell.match(/^(-?\d{1,3}\.\d+),\s*(-?\d{1,3}\.\d+)$/);
+        if (m) return { lat: m[1], lng: m[2] };
+        return { lat: "", lng: "" };
+      };
+
+      // ── Step 3: also try extracting from any Google Maps link in any column ──
+      const newRows: BatchRow[] = dataRows
         .map((parts) => {
           let lat = latIdx >= 0 ? parts[latIdx]?.trim() ?? "" : "";
           let lng = lngIdx >= 0 ? parts[lngIdx]?.trim() ?? "" : "";
 
+          // Try named map column first
           if ((!lat || !lng) && mapIdx >= 0) {
-            const match = (parts[mapIdx] ?? "").match(/query=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
-            if (match) { lat = lat || match[1]; lng = lng || match[2]; }
+            const extracted = extractLatLng(parts[mapIdx]?.trim() ?? "");
+            if (!lat) lat = extracted.lat;
+            if (!lng) lng = extracted.lng;
+          }
+
+          // Last resort: scan every cell for a Google Maps link
+          if (!lat || !lng) {
+            for (const cell of parts) {
+              if (cell.includes("google.com/maps") || cell.includes("maps.app.goo")) {
+                const extracted = extractLatLng(cell.trim());
+                if (extracted.lat && extracted.lng) { lat = extracted.lat; lng = extracted.lng; break; }
+              }
+            }
           }
 
           const propId = propIdIdx >= 0 ? parts[propIdIdx]?.trim() ?? "" : "";
@@ -106,7 +173,18 @@ export function BatchPage() {
         })
         .filter((r) => r.latitude && r.longitude);
 
-      if (newRows.length > 0) dispatch(setBatchRows(newRows));
+      if (newRows.length === 0) {
+        const colsFound = headers.slice(0, 20).join(", ") + (headers.length > 20 ? ` ... (${headers.length} total)` : "");
+        setCsvError(
+          `No valid rows found. Columns detected: [${colsFound}]. ` +
+          `Make sure your CSV has columns with latitude (24–31) and longitude (-80 to -87) values, ` +
+          `or a Google Maps link column.`
+        );
+        return;
+      }
+
+      dispatch(setBatchRows(newRows));
+      setCsvError(null);
     };
     reader.readAsText(file);
   };
@@ -184,9 +262,21 @@ export function BatchPage() {
           <label className="flex items-center gap-2 text-xs text-blue-400 hover:text-blue-300 cursor-pointer">
             <Upload className="w-3.5 h-3.5" />
             Import CSV
-            <input type="file" accept=".csv" className="hidden" onChange={handleCSV} />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.txt"
+              className="hidden"
+              onChange={handleCSV}
+            />
           </label>
         </div>
+
+        {csvError && (
+          <div className="mb-3 px-3 py-2 rounded-lg bg-red-950/40 border border-red-800/50 text-xs text-red-400">
+            {csvError}
+          </div>
+        )}
 
         <div className="text-xs text-gray-600 mb-2 px-1 grid grid-cols-[1fr_1fr_1fr_32px] gap-2">
           <span>Latitude</span><span>Longitude</span><span>Property ID</span><span />

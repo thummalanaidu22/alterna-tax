@@ -26,7 +26,7 @@ _TINY_PARCEL_SQFT   = 800
 _MIN_BUILDABLE_SQFT = 2_000
 
 # Confidence below this → force NEEDS_HUMAN_REVIEW (per SOP reference in models)
-_LOW_CONFIDENCE_THRESHOLD = 0.75
+_LOW_CONFIDENCE_THRESHOLD = 0.70
 
 class RuleEngine:
     """
@@ -82,7 +82,7 @@ class RuleEngine:
                 obs.has_structure = False
 
             # Structure detected but confidence is low — require aerial confirmation
-            if obs.has_structure and confidence < 0.80:
+            if obs.has_structure and confidence < 0.70:
                 review_reasons.append("Structure detected but confidence is low — aerial confirmation needed")
 
             # Global banned-facility check (catches misclassified property types)
@@ -159,18 +159,24 @@ class RuleEngine:
 
     def _check_residential(self, obs: PropertyObservations) -> List[str]:
         reasons = []
+        # Plywood boards on windows → REJECT (hurricane shutters = OK per SOP)
         if obs.boarded_windows and not obs.hurricane_shutters:
             reasons.append("Plywood-boarded windows detected — property condemned or abandoned")
-        if obs.structure_burned:
-            reasons.append("Fire/burn damage to structure")
-        if obs.visible_structure_damage:
-            reasons.append("Visible structural damage")
+        # Roof or structural damage → REJECT
         if obs.roof_damage:
             reasons.append("Significant roof damage visible")
-        if obs.under_construction:
-            reasons.append("Property under active construction — structure incomplete")
+        if obs.visible_structure_damage:
+            reasons.append("Visible structural damage detected")
+        # Burned / fire damage → REJECT
+        if obs.structure_burned:
+            reasons.append("Fire/burn damage to structure")
+        # Heavy trash & debris → REJECT
         if obs.trash_or_debris:
             reasons.append("Heavy trash/debris covering property — uninhabitable per SOP")
+        # Abandoned appearance → REJECT (SOP: abandoned = reject)
+        if obs.vacancy_signs:
+            reasons.append("Abandoned appearance — boarded, overgrown, and no activity detected")
+        # NOTE: under_construction is NOT a rejection per SOP — it is listed as OK
         return reasons
 
     def _residential_review_flags(self, obs: PropertyObservations) -> List[str]:
@@ -179,9 +185,9 @@ class RuleEngine:
             flags.append("Mobile/manufactured home detected — requires underwriter review")
         if not obs.has_structure:
             flags.append("No permanent structure detected on parcel — verify property type")
-        # vacancy_signs only triggers a review flag when corroborated by at least one other signal
-        if obs.vacancy_signs and (not obs.has_structure or obs.abandoned_appearance or obs.trash_or_debris):
-            flags.append("Multiple vacancy indicators detected — verify occupancy status")
+        # Under construction is SOP-OK but flag for awareness
+        if obs.under_construction:
+            flags.append("Property under renovation/construction — verify completion status")
         return flags
 
     def _check_commercial(self, obs: PropertyObservations) -> List[str]:
@@ -196,12 +202,13 @@ class RuleEngine:
             reasons.append("Narrow/side lot — unbuildable, no usable street frontage")
         if obs.parcel_shape == ParcelShape.TRIANGLE:
             reasons.append("Triangle-shaped lot — not buildable")
-        if not obs.street_frontage:
-            reasons.append("No street frontage — rear/alley lot, not independently buildable")
-        if obs.landlocked:
+        # Only reject for no street frontage if it's clearly a rear/landlocked lot
+        if not obs.street_frontage and obs.landlocked:
+            reasons.append("Landlocked parcel — no road or street frontage")
+        elif obs.landlocked:
             reasons.append("Landlocked parcel — no road access")
-        if not obs.road_access:
-            reasons.append("No road access visible")
+        elif not obs.street_frontage and not obs.road_access:
+            reasons.append("No street frontage and no road access visible")
         if obs.wooded:
             reasons.append("Heavily wooded — buildability concern")
         if not obs.lot_size_adequate_vs_neighborhood:
@@ -220,14 +227,17 @@ class RuleEngine:
         return reasons
 
     def _agriculture_review_flags(self, obs: PropertyObservations) -> List[str]:
-        """Agriculture: SOP approves ONLY when all 3 positive criteria are met."""
+        """
+        Agriculture soft review flags — only road access is a hard blocker.
+        House and shape are preferences, not hard SOP rejections.
+        """
         flags = []
-        if not obs.agri_has_house_on_parcel:
-            flags.append("No house/structure on agricultural parcel — SOP requires dwelling on parcel")
-        if not obs.agri_fronts_road:
+        # Road access is critical — flag if missing
+        if not obs.agri_fronts_road and not obs.road_access:
             flags.append("Agricultural parcel does not appear to front a road — verify access")
-        if not obs.agri_parcel_shape_regular:
-            flags.append("Parcel shape is not rectangular/square — SOP prefers regular-shaped agriculture parcels")
+        # House on parcel is preferred but not a hard reject
+        if not obs.agri_has_house_on_parcel:
+            flags.append("No dwelling confirmed on agricultural parcel — verify use")
         return flags
 
     # ── GIS-based checks ──────────────────────────────────────────────────────
@@ -396,10 +406,14 @@ class RuleEngine:
             # Agriculture criteria
             is_agri = str(vr.get("property_type", "")).lower() == "agriculture"
 
+            # hurricane_shutters: vision model returns plywood_on_windows=false for shutters,
+            # so if plywood=false, treat shutters as potentially present (safe default)
+            shutters = bool(vr.get("hurricane_shutters", False))
+
             return PropertyObservations(
                 boarded_windows=plywood,
-                hurricane_shutters=False,
-                roof_damage=False,
+                hurricane_shutters=shutters,
+                roof_damage=damaged,        # damaged_or_burned covers roof damage per vision prompt
                 visible_structure_damage=damaged,
                 structure_burned=damaged,
                 abandoned_appearance=debris,
