@@ -182,7 +182,13 @@ class PipelineOrchestrator:
                 )
 
                 aerial_available = satellite_path is not None
-                parcel_with_flags = {**(parcel or {}), "aerial_image_available": aerial_available}
+                parcel_with_flags = {
+                    **(parcel or {}),
+                    "aerial_image_available": aerial_available,
+                    # Hint passed to rule engine ONLY — never to vision model.
+                    # Rule engine uses it as last resort when vision returns "unknown".
+                    "property_type_hint": job.property_type_hint or "",
+                }
                 result = await self._run_stage(
                     job, "rule_engine", self._stage_rules, vision_result, parcel_with_flags
                 )

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueries } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react";
 import { propertyApi } from "../services/api";
 import { Card } from "../components/ui/Card";
@@ -19,6 +19,34 @@ export function JobsPage() {
   // Read from Redux — empty on page refresh, populates as jobs are submitted this session
   const jobs = useAppSelector((s) => s.jobs.recentJobs);
 
+  // Auto-refresh jobs that are still running OR completed but have no result in Redux yet.
+  // Once a job has result + completed status, stop polling it entirely.
+  const pendingJobs = jobs.filter(
+    (j) => j.status === "queued" || j.status === "processing" || !j.result
+  );
+  const refreshResults = useQueries({
+    queries: pendingJobs.map((j) => ({
+      queryKey: ["job-refresh", j.job_id],
+      queryFn: () => propertyApi.getJob(j.job_id),
+      // Only keep polling while the job is actively running
+      refetchInterval: (q: any) => {
+        const s = q.state.data?.status;
+        if (s === "queued" || s === "processing") return 2000;
+        return false; // completed/failed — fetch once then stop
+      },
+      staleTime: 30_000, // don't re-fetch within 30s if already loaded
+      retry: 1,
+    })),
+  });
+
+  // Dispatch every refreshed job back to Redux so badges update
+  useEffect(() => {
+    refreshResults.forEach((r) => {
+      if (r.data) dispatch(upsertJob(r.data));
+    });
+  }, [refreshResults, dispatch]);
+
+  // Selected job — deeper polling for the detail panel
   const { data: selectedJob } = useQuery({
     queryKey: ["job", selectedId],
     queryFn: () => propertyApi.getJob(selectedId!),
@@ -59,25 +87,30 @@ export function JobsPage() {
                   : "bg-gray-900 border-gray-800 hover:border-gray-700"
               }`}
             >
-              <div className="flex items-start justify-between gap-2">
+              {/* Decision badge — full width, first thing visible */}
+              {job.result ? (
+                <div className="mb-2">
+                  <DecisionBadge decision={job.result.decision} />
+                </div>
+              ) : (
+                <div className="mb-2">
+                  <StatusBadge status={job.status} />
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    {job.property_id && (
-                      <span className="text-xs bg-gray-700 text-gray-300 px-1.5 py-0.5 rounded">{job.property_id}</span>
-                    )}
-                    <StatusBadge status={job.status} />
-                  </div>
+                  {job.property_id && (
+                    <p className="text-xs font-medium text-gray-300 truncate">{job.property_id}</p>
+                  )}
                   <p className="text-xs text-gray-500 font-mono">
                     {job.latitude.toFixed(5)}, {job.longitude.toFixed(5)}
                   </p>
-                  <p className="text-xs text-gray-700 mt-1">
+                  <p className="text-xs text-gray-700 mt-0.5">
                     {formatDistanceToNow(new Date(job.created_at), { addSuffix: true })}
                   </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {job.result && <DecisionBadge decision={job.result.decision} />}
-                  <ChevronRight className="w-4 h-4 text-gray-700" />
-                </div>
+                <ChevronRight className="w-4 h-4 text-gray-700 shrink-0" />
               </div>
             </div>
           ))}

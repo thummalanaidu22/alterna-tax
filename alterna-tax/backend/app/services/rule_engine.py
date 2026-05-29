@@ -25,8 +25,9 @@ _GIS_AGRICULTURE_KEYWORDS = {"agriculture", "farm", "ranch", "timberland", "grov
 _TINY_PARCEL_SQFT   = 800
 _MIN_BUILDABLE_SQFT = 2_000
 
-# Confidence below this → force NEEDS_HUMAN_REVIEW (per SOP reference in models)
-_LOW_CONFIDENCE_THRESHOLD = 0.70
+# Confidence below this → force NEEDS_HUMAN_REVIEW
+# 0.55 allows satellite-only properties (typical ~0.60-0.70 after boosts) to get definitive decisions
+_LOW_CONFIDENCE_THRESHOLD = 0.55
 
 class RuleEngine:
     """
@@ -51,11 +52,21 @@ class RuleEngine:
         aerial_available = bool(parcel.get("aerial_image_available", True)) and not no_images
 
         prop_type_raw = vr.get("property_type", "unknown")
+
         if prop_type_raw in ("unknown", ""):
+            # Vision could not determine type — try GIS land-use description first
             gis_type = self._gis_property_type(parcel)
             if gis_type:
                 prop_type_raw = gis_type
-                logger.info(f"Property type corrected by GIS: {gis_type}")
+                logger.info(f"Property type from GIS: {gis_type}")
+            else:
+                # GIS also has no data — use property_type_hint as absolute last resort.
+                # This is the Alterna filter name (e.g. "residential", "vacant_land").
+                # It ONLY kicks in when the vision model genuinely returned "unknown".
+                hint = str(parcel.get("property_type_hint", "") or "").lower().strip()
+                if hint:
+                    prop_type_raw = hint
+                    logger.info(f"Property type from hint (last resort): {hint}")
 
         prop_type = self._parse_property_type(prop_type_raw)
 
@@ -81,9 +92,9 @@ class RuleEngine:
                 logger.info("Rule engine override: vacant_land + has_structure=true → corrected to false")
                 obs.has_structure = False
 
-            # Structure detected but confidence is low — require aerial confirmation
-            if obs.has_structure and confidence < 0.70:
-                review_reasons.append("Structure detected but confidence is low — aerial confirmation needed")
+            # Structure detected but confidence is very low — require aerial confirmation
+            if obs.has_structure and confidence < 0.55:
+                review_reasons.append("Structure detected but confidence is very low — aerial confirmation needed")
 
             # Global banned-facility check (catches misclassified property types)
             banned_reasons = self._check_banned_facility_global(obs)
@@ -288,7 +299,12 @@ class RuleEngine:
     def _adjust_confidence_with_gis(self, base: float, parcel: Dict[str, Any]) -> float:
         props = parcel.get("properties", {})
         if not props or props.get("estimated"):
-            return base
+            # No real GIS data — apply a smaller boost for having any parcel context
+            # This compensates for the missing +0.07 GIS boost when Regrid is unavailable
+            osm_source = props.get("source") if props else None
+            if osm_source == "osm_landuse":
+                return round(min(base + 0.05, 0.97), 2)  # OSM gave us real boundary
+            return round(min(base + 0.03, 0.97), 2)  # estimated only — small boost
         return round(min(base + 0.07, 0.97), 2)
 
     def _boost_confidence_for_completeness(

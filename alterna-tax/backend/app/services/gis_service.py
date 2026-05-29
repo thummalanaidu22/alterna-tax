@@ -1,10 +1,8 @@
 import httpx
-import asyncio
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List
 from shapely.geometry import shape, Polygon, mapping
 from shapely.ops import transform
 import pyproj
-import json
 import logging
 
 from ..config import settings
@@ -37,7 +35,7 @@ class GISService:
 
         # No real boundary available — detect property type from OSM context so the
         # estimated box is the right size for this specific property
-        detected_type = hint = (property_type_hint or "").lower()
+        detected_type = (property_type_hint or "").lower()
         if not detected_type:
             detected_type = await self._detect_type_from_osm(lat, lon)
             if detected_type:
@@ -82,18 +80,15 @@ class GISService:
     async def _detect_type_from_osm(self, lat: float, lon: float) -> str:
         """
         Query OSM tags within 150m to auto-detect property type when no hint is given.
+        Uses simple around: radius queries — avoids 406 errors from complex is_in/pivot syntax.
         Returns one of: 'residential', 'commercial', 'agriculture', 'vacant', or ''
         """
         query = (
             f"[out:json][timeout:10];"
-            f"("
-            f"  way[\"landuse\"](around:150,{lat},{lon});"
-            f"  way[\"building\"](around:80,{lat},{lon});"
-            f"  way[\"amenity\"](around:80,{lat},{lon});"
-            f"  way[\"shop\"](around:80,{lat},{lon});"
-            f"  way[\"natural\"=\"wood\"](around:150,{lat},{lon});"
-            f"  way[\"natural\"=\"scrub\"](around:150,{lat},{lon});"
-            f");"
+            f"(way[\"landuse\"](around:200,{lat},{lon});"
+            f"way[\"building\"](around:100,{lat},{lon});"
+            f"way[\"amenity\"](around:100,{lat},{lon});"
+            f"way[\"shop\"](around:100,{lat},{lon}););"
             f"out tags;"
         )
         overpass_endpoints = [
@@ -148,18 +143,15 @@ class GISService:
 
     async def _fetch_osm_plot(self, lat: float, lon: float) -> Optional[Dict[str, Any]]:
         """
-        Query OSM Overpass for the landuse/plot polygon containing this point.
+        Query OSM Overpass for a landuse/building polygon near this point.
+        Uses simple around: radius — avoids 406 errors caused by is_in/pivot syntax.
         Returns the smallest matching polygon (most specific to this property).
         Free — no API key required.
         """
-        # is_in query: find all OSM areas that contain the point, filter to land-related ones
         query = (
             f"[out:json][timeout:12];"
-            f"is_in({lat},{lon})->.a;"
-            f"(way(pivot.a)[landuse];"
-            f"way(pivot.a)[\"building\"];"
-            f"way(pivot.a)[\"boundary\"=\"parcel\"];"
-            f");"
+            f"(way[\"landuse\"](around:50,{lat},{lon});"
+            f"way[\"building\"](around:30,{lat},{lon}););"
             f"out body;>;out skel qt;"
         )
         overpass_endpoints = [
@@ -220,20 +212,22 @@ class GISService:
         """
         hint = (property_type_hint or "").lower()
 
-        # Typical parcel sizes by type (half-side in degrees)
+        # Parcel size estimates by type (half-side in degrees)
         # lat: 1 deg ≈ 111,320m  |  lon: 1 deg ≈ 111,320 * cos(lat) m (≈ 97,000m at 28°N)
+        # MINIMUM 60m side — GPS coords can be 20-40m from building, box must cover the offset
         if "agri" in hint or "farm" in hint or "ranch" in hint or "grove" in hint:
-            # Agriculture: ~5 acres = ~465m × 465m
-            delta_lat, delta_lon = 0.00209, 0.00240
+            # Agriculture: ~5 acres = ~450m × 450m
+            delta_lat, delta_lon = 0.00202, 0.00232
         elif "commercial" in hint or "retail" in hint or "office" in hint or "industrial" in hint:
-            # Commercial: ~200ft × 300ft
-            delta_lat, delta_lon = 0.000275, 0.000309
+            # Commercial: ~300ft × 300ft
+            delta_lat, delta_lon = 0.000413, 0.000464
         elif "vacant" in hint or "unimproved" in hint or "land" in hint:
-            # Vacant land: ~150ft × 150ft
-            delta_lat, delta_lon = 0.000206, 0.000232
+            # Vacant land: ~250ft × 250ft
+            delta_lat, delta_lon = 0.000344, 0.000387
         else:
-            # Residential default: ~80ft × 100ft typical Florida lot
-            delta_lat, delta_lon = 0.000110, 0.000124
+            # Residential / unknown default: ~200ft × 200ft
+            # Large enough to contain house even when GPS coord is at street edge
+            delta_lat, delta_lon = 0.000275, 0.000309
 
         coords = [
             [lon - delta_lon, lat - delta_lat],

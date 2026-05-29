@@ -73,23 +73,23 @@ class SatelliteService:
 
     def _choose_zoom(self, parcel: Dict[str, Any]) -> int:
         """
-        Pick satellite zoom level based on parcel size so the full property
-        boundary is always visible in the image.
-          zoom 20 → ~0.15m/px  — very small lots  (< 2,000 sqft)
-          zoom 19 → ~0.30m/px  — typical residential lots (2,000–20,000 sqft)
-          zoom 18 → ~0.60m/px  — large commercial / multi-acre (20,000–200,000 sqft)
-          zoom 17 → ~1.20m/px  — agriculture / large farms (> 200,000 sqft)
+        Pick satellite zoom level based on parcel size.
+          zoom 20 → ~0.15m/px  — residential / small lots (< 30,000 sqft) — maximum detail
+          zoom 19 → ~0.30m/px  — medium lots / commercial (30,000–200,000 sqft)
+          zoom 18 → ~0.60m/px  — large commercial / multi-acre (200,000–500,000 sqft)
+          zoom 17 → ~1.20m/px  — agriculture / large farms (> 500,000 sqft)
+        Using zoom 20 as default (from config) for maximum clarity on typical Florida lots.
         """
         area = parcel.get("area_sqft") if parcel else None
         if area is None:
-            return self.zoom  # default from config
-        if area < 2_000:
-            return 20
-        if area < 20_000:
-            return 19
+            return self.zoom  # default from config (now 20)
+        if area < 50_000:
+            return 20  # residential / small lots — maximum detail (0.15m/px)
         if area < 200_000:
-            return 18
-        return 17
+            return 19  # medium commercial
+        if area < 500_000:
+            return 18  # large commercial / multi-acre
+        return 17      # agriculture / large farms
 
     async def capture(
         self,
@@ -98,11 +98,10 @@ class SatelliteService:
         parcel: Dict[str, Any],
         job_id: str,
     ) -> Optional[str]:
-        # Choose zoom based on parcel size BEFORE fetching tiles
+        # Choose zoom based on GIS parcel size (if real) or default for estimated
         zoom = self._choose_zoom(parcel)
-        if zoom != self.zoom:
-            logger.info("Adaptive zoom: parcel %.0f sqft → zoom %d (default %d)",
-                        parcel.get("area_sqft", 0), zoom, self.zoom)
+        logger.info("Satellite capture: zoom=%d parcel_area=%.0f sqft",
+                    zoom, parcel.get("area_sqft", 0) if parcel else 0)
 
         result = await asyncio.to_thread(self._fetch_esri_tiles, lat, lon, zoom)
         if not result:
@@ -112,28 +111,49 @@ class SatelliteService:
         img_bytes, actual_zoom = result  # unpack image + zoom actually used
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-        # Use the actual GIS parcel polygon when available (most accurate).
-        # Only fall back to OSM building footprint / estimated box if GIS has no geometry.
-        polygon = self._extract_parcel_polygon(parcel, lat, lon)
-        if polygon:
-            logger.info("Using GIS parcel polygon for satellite overlay (%d pts)", len(polygon))
-        else:
-            # GIS had no polygon — query OSM building footprint
-            polygon = await asyncio.to_thread(self._query_overpass_polygon, lat, lon)
+        # ── Polygon priority (highest accuracy → fallback) ─────────────────────
+        # 1. Real Regrid GIS parcel (exact tax parcel boundary)
+        # 2. OSM building footprint (UNIQUE per property — fixes same-box-for-all bug)
+        # 3. Estimated box scaled to the actual building footprint area
+        # 4. Fixed estimated box as absolute last resort
+        #
+        # CRITICAL: never use an estimated GIS box when OSM building data is available.
+        # Estimated boxes are identical for all same-type properties → model sees same
+        # pattern → classifies all as the same type.
+
+        gis_parcel   = parcel or {}
+        is_estimated = gis_parcel.get("properties", {}).get("estimated", True)
+
+        polygon = None
+
+        # Priority 1: real Regrid polygon (not estimated)
+        if not is_estimated:
+            polygon = self._extract_parcel_polygon(gis_parcel, lat, lon)
             if polygon:
-                # Validate the OSM polygon is actually close to the target (not a neighbour)
-                osm_clat = sum(p[0] for p in polygon) / len(polygon)
-                osm_clon = sum(p[1] for p in polygon) / len(polygon)
-                dist_m = math.hypot((osm_clat - lat) * 111_320,
-                                    (osm_clon - lon) * 111_320 * math.cos(math.radians(lat)))
-                if dist_m > 30:
-                    logger.warning("OSM polygon centroid is %.0fm away — too far, using estimated footprint", dist_m)
-                    polygon = None
+                logger.info("Polygon: real Regrid GIS boundary (%d pts)", len(polygon))
+
+        # Priority 2: OSM building footprint — ALWAYS try this before estimated box
+        # Each building has a unique footprint → model sees different shapes per property
+        if not polygon:
+            osm_bldg = await asyncio.to_thread(self._query_overpass_polygon, lat, lon)
+            if osm_bldg:
+                osm_clat = sum(p[0] for p in osm_bldg) / len(osm_bldg)
+                osm_clon = sum(p[1] for p in osm_bldg) / len(osm_bldg)
+                dist_m   = math.hypot((osm_clat - lat) * 111_320,
+                                      (osm_clon - lon) * 111_320 * math.cos(math.radians(lat)))
+                if dist_m <= 60:
+                    # Scale the building footprint outward to approximate the parcel boundary.
+                    # Typical US lot = 3-4× building footprint area. Scale factor 2.0 adds ~40% margin.
+                    polygon = self._scale_polygon(osm_bldg, osm_clat, osm_clon, scale=2.0)
+                    logger.info("Polygon: OSM building footprint × 2.0 scale (centroid %.0fm away, %d pts)", dist_m, len(polygon))
                 else:
-                    logger.info("OSM polygon accepted (centroid %.0fm from target)", dist_m)
-            if not polygon:
-                logger.info("No polygon available — using estimated parcel footprint")
-                polygon = self._estimated_building_footprint(lat, lon)
+                    logger.warning("OSM building %.0fm away — too far, skipping", dist_m)
+
+        # Priority 3: estimated GIS box (same type = same size — last resort only)
+        if not polygon:
+            polygon = self._extract_parcel_polygon(gis_parcel, lat, lon)
+            if polygon:
+                logger.info("Polygon: estimated GIS box (no building found — likely vacant/agriculture)")
 
         self._draw_overlay(img, lat, lon, polygon, actual_zoom)
 
@@ -272,6 +292,25 @@ class SatelliteService:
 
         logger.warning("All Overpass endpoints failed")
         return None
+
+    def _scale_polygon(
+        self,
+        polygon: List[Tuple[float, float]],
+        center_lat: float,
+        center_lon: float,
+        scale: float = 2.0,
+    ) -> List[Tuple[float, float]]:
+        """
+        Scale a polygon outward from its centroid by `scale` factor.
+        Used to expand an OSM building footprint into an approximate parcel boundary.
+        scale=2.0 → parcel is ~2× larger than the building in each direction.
+        """
+        scaled = []
+        for lat, lon in polygon:
+            new_lat = center_lat + (lat - center_lat) * scale
+            new_lon = center_lon + (lon - center_lon) * scale
+            scaled.append((new_lat, new_lon))
+        return scaled
 
     def _extract_parcel_polygon(
         self, parcel: Dict[str, Any], lat: float, lon: float

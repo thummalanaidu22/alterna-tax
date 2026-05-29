@@ -22,27 +22,35 @@ except ImportError:
 
 # ── Primary prompt ─────────────────────────────────────────────────────────────
 
-ANALYSIS_PROMPT = """You are analyzing a property for a real estate investment fund. You have up to 4 images:
-- Image 1: Aerial/satellite view. The RED boundary outlines the exact parcel to evaluate.
-- Images 2-4: Street-level photos of the same property from different angles (left, center, right).
+ANALYSIS_PROMPT = """You are analyzing a Florida real estate property. You have satellite + street view images.
+Images: [1]=Aerial satellite with RED CROSSHAIR marking the property. [2-4]=Street views of the same property.
 
-STEP 1 — DETERMINE PROPERTY TYPE FIRST (most important field):
-Look at the aerial and street views carefully. Ask yourself:
-  A) Is there a house / townhouse / duplex / condo unit inside the boundary? → "residential"
-  B) Is it a store, office, restaurant, strip mall, warehouse, clinic, hotel, apartment complex? → "commercial"
-  C) Is the parcel empty land with NO structure — just grass, dirt, trees, or pavement? → "vacant_land"
-  D) Is it farmland, grove, ranch, pasture, timberland — large open land used for farming? → "agriculture"
-  E) Is the structure clearly a manufactured/mobile home on a chassis or blocks? → "mobile_home"
-  F) Is it a factory, warehouse, industrial facility, self-storage, auto yard? → "industrial"
-  G) Cannot tell at all? → "unknown"
+━━━ STEP 1: ANSWER THESE QUESTIONS FIRST (look at each image before answering) ━━━
 
-CRITICAL: Do NOT default to "residential". Look at what is actually there.
-  - Empty grass lot with no building = "vacant_land", NOT residential
-  - Farm fields, groves, pastures = "agriculture", NOT residential
-  - Stores, offices, warehouses = "commercial", NOT residential
-  - Mobile/manufactured home = "mobile_home", NOT residential
+Q1. AERIAL IMAGE — look at the RED CROSSHAIR location:
+    • Is there a building rooftop (rectangular shape, roof texture) visible at/near the crosshair? YES / NO
+    • If YES — is the roof PITCHED/SLOPED (residential) or FLAT/LARGE (commercial)?
+    • Is the area around the crosshair bare open land with no structures? YES / NO
+    • Are there farm field rows, groves, or agricultural crop patterns? YES / NO
 
-STEP 2 — Fill in the full JSON. Return ONLY valid JSON, no markdown fences:
+Q2. STREET VIEW IMAGES (if available — these are MORE RELIABLE than aerial):
+    • Does the street view show a HOUSE (front door, windows, lawn, driveway)? YES / NO
+    • Does the street view show a BUSINESS (storefront, sign, large glass windows, parking lot)? YES / NO
+    • Does the street view show an EMPTY LOT (just grass, dirt, fence with nothing built)? YES / NO
+    • Does the street view show a FARM or RURAL LAND (fields, fences, agricultural equipment)? YES / NO
+    • Does the street view show a MOBILE HOME (metal siding, on blocks, rectangular structure on trailer chassis)? YES / NO
+
+Q3. DETERMINE PROPERTY TYPE from your answers above:
+    • Q2=house OR (Q1=pitched roof AND residential neighborhood) → "residential"
+    • Q2=business OR Q1=flat large roof with parking → "commercial"
+    • Q1=bare land AND Q2=empty lot → "vacant_land"
+    • Q1=farm patterns OR Q2=farm/rural → "agriculture"
+    • Q2=mobile home → "mobile_home"
+    • Cannot see anything clearly → "unknown"
+
+━━━ STEP 2: FILL IN JSON (based ONLY on your answers above) ━━━
+Return ONLY valid JSON, no markdown:
+
 {
   "property_type": "unknown",
   "damaged_or_burned": false,
@@ -69,60 +77,65 @@ STEP 2 — Fill in the full JSON. Return ONLY valid JSON, no markdown fences:
   "agri_fronts_road": false,
   "agri_shape_regular": false,
   "confidence": 0.88,
-  "notes": "one sentence describing what you see inside the red boundary"
+  "notes": "one sentence describing what you see at the crosshair location"
 }
 
-Field rules:
-- property_type: MUST be one of: "residential" / "commercial" / "vacant_land" / "agriculture" / "mobile_home" / "industrial" / "unknown"
-  Visual cues by type:
-    residential  → pitched roof house, single/multi-family home, townhouse, condo, duplex
-    commercial   → flat-roof building, storefront, parking lot with business, office, warehouse, apartment complex (5+ units)
-    vacant_land  → empty lot, cleared land, raw land, grassy parcel, no structure visible inside boundary
-    agriculture  → farm rows, grove trees in rows, pasture/grazing land, ranch, greenhouse, large open rural land
-    mobile_home  → rectangular metal/vinyl structure on chassis, visible skirting, not a site-built foundation
-    industrial   → large metal building, loading docks, outdoor storage yard, self-storage facility
-- damaged_or_burned: true ONLY if structure shows collapse, burn marks, fire damage, or partial demolition. Normal wear=false.
-- plywood_on_windows: true ONLY for raw WOOD boards nailed over window openings. Hurricane shutters=false. Blinds=false.
-- heavy_garbage_debris: true ONLY if clearly visible MAN-MADE waste: trash bags, junk cars, appliances, rubble piles. Grass/trees/weeds/bushes=false. Natural vegetation=false.
-- vacancy_signs: true ONLY if a structure EXISTS AND shows boarded windows + overgrown + no activity ALL together. Vacant lot with no building=false.
-- mobile_home: true if clearly a prefabricated manufactured home on blocks/chassis, not a site-built house.
-- hurricane_shutters: true if windows/doors are covered by ALUMINUM or METAL accordion/roll-down storm shutters. These are NOT boards — they are metallic, uniform, and fitted to the window frame. false for plywood boards, false for open windows.
+Field rules — base each field on your answers from Step 1:
+- property_type: Use Q3 result above. MUST be one of:
+    "residential" / "commercial" / "vacant_land" / "agriculture" / "mobile_home" / "industrial" / "unknown"
+- CRITICAL: Each property is different. Residential looks different from commercial. If street views show a house → residential. If empty lot → vacant_land. Look carefully at EACH property individually.
+- damaged_or_burned: true ONLY if structure shows collapse, burn marks, fire damage, partial demolition.
+- plywood_on_windows: true ONLY for raw WOOD boards nailed over windows. Hurricane shutters=false.
+- heavy_garbage_debris: true ONLY if clearly visible MAN-MADE waste: trash bags, junk cars, appliances, rubble. Grass/trees/weeds=false.
+- vacancy_signs: true ONLY if structure EXISTS AND shows boarded windows + overgrown + no activity ALL together.
+- mobile_home: true if clearly a prefabricated manufactured home on blocks/chassis.
+- hurricane_shutters: true if ALUMINUM or METAL accordion/roll-down storm shutters cover windows. NOT wood boards.
 - under_construction: true ONLY if exposed framing, missing roof, scaffolding, no exterior finish.
 - religious_building_type: "church" / "synagogue" / "mosque" / "temple" / "none"
 - commercial_reject_type: "gas_station" / "auto_repair" / "none"
 - hospital: true ONLY for large multi-story hospital/ER complex. Small clinic=false.
 - k12_school: true ONLY for K-12 campus with playground/portables. Preschool/daycare=false.
-- has_road_access: false ONLY if completely landlocked with zero road or driveway touching.
+- has_road_access: false ONLY if completely landlocked with zero road or driveway access.
 - street_frontage: false ONLY if rear/alley lot with zero public street frontage.
 - side_lot: true ONLY if narrow sliver strip with no buildable width.
-- triangle_lot: true ONLY if aerial shows a clearly triangular wedge shape.
-- lot_size_adequate: false if visibly much smaller than all neighboring lots and unbuildable.
-- heavily_wooded: true ONLY if the ENTIRE parcel is dense trees with zero cleared area.
-- water_hole_on_land: true ONLY for water-filled depression or wet area INSIDE parcel. Pool=false. Adjacent pond=false.
-- parcel_is_parking_only: true if aerial shows the boundary contains ONLY a parking lot with no building.
-- has_structure: AERIAL Image 1 ONLY — is there a building footprint (roof shape, rectangle) INSIDE the RED boundary? Default=false. Only true if certain from aerial.
-- agri_has_house / agri_fronts_road / agri_shape_regular: agriculture parcels ONLY — set false for all other types.
-- confidence: 0.96=crystal clear all fields certain / 0.92=clear images type confirmed / 0.87=minor obstruction / 0.75=uncertainty on 1-2 fields / 0.62=satellite only / 0.45=cannot determine type
-  * Clear daytime images where type is obvious → use 0.92 or higher. Do NOT default to 0.75 or 0.88."""
+- triangle_lot: true ONLY if aerial shows clearly triangular wedge-shaped lot.
+- lot_size_adequate: false if visibly much smaller than all neighboring lots.
+- heavily_wooded: true ONLY if the ENTIRE area near the crosshair is dense trees with zero cleared area.
+- water_hole_on_land: true ONLY for water-filled depression INSIDE/near the parcel. Pool=false. Adjacent pond=false.
+- parcel_is_parking_only: true if the entire area near crosshair is ONLY a parking lot with no building.
+- has_structure: Look at the RED CROSSHAIR area in Image 1. Is there a building rooftop (roof shape, rectangle, structure) visible AT or NEAR the crosshair, OR inside the red boundary? Also check street views — if street views show a clear building at this address, set true. Default=false ONLY if no building visible anywhere near the crosshair in any image.
+- agri_has_house / agri_fronts_road / agri_shape_regular: agriculture parcels ONLY.
+- confidence: your certainty in the decision. Use this exact scale:
+    0.95 = satellite + 2-3 street views, all fields answered with certainty
+    0.90 = satellite + 1 street view, property type and condition clearly confirmed
+    0.82 = satellite only, property type is CLEARLY visible (house, empty lot, farm, store) — USE THIS for most satellite-only cases
+    0.72 = satellite only, some uncertainty on 1 field (condition or exact type)
+    0.60 = satellite only, genuinely unclear on multiple fields
+    0.45 = cannot determine property type at all from images
+  RULES:
+    * If you can clearly see the property type from the satellite image → use 0.82 or higher
+    * DO NOT use 0.62 or lower unless the images are genuinely blurry, dark, or show nothing identifiable
+    * Most clear daytime satellite images of Florida properties should get 0.82+
+    * Only use low confidence (< 0.60) if you truly cannot make a determination"""
 
 # ── Second-pass prompt (focused re-analysis for low confidence) ───────────────
 
 SECOND_PASS_PROMPT = """Review these property images again. Your previous analysis had low confidence ({prev_conf:.0%}).
 
-STEP 1 — Re-determine the property type. Look at the aerial and street views:
-  - Empty lot, grass, raw land, no building inside boundary → "vacant_land"
-  - Farm rows, grove, pasture, rural land → "agriculture"
-  - Mobile/manufactured home on chassis/blocks → "mobile_home"
-  - Store, office, warehouse, apartment complex → "commercial"
-  - Factory, industrial building, storage yard → "industrial"
-  - Single/multi-family house, condo, townhouse → "residential"
-  - Cannot determine → "unknown"
-Do NOT default to "residential". Use what you actually see.
+STEP 1 — Re-determine the property type. The RED CROSSHAIR marks the target location.
+  Look at the crosshair area + street views to determine:
+  - House/building visible near the crosshair in ANY image → NOT vacant_land
+  - Farm/ranch/pasture/grove → "agriculture" (not vacant_land)
+  - Empty land with NO structure in ANY image → "vacant_land"
+  - Mobile/manufactured home → "mobile_home"
+  - Store/office/warehouse → "commercial"
+  - Factory/industrial → "industrial"
+  - Site-built house → "residential"
 
 CRITICAL RULES:
-- heavy_garbage_debris: ONLY man-made waste (trash bags, junk cars, appliances, rubble). Grass/trees/weeds = false.
-- vacancy_signs: ONLY if a STRUCTURE exists AND shows boarded windows + overgrown + no activity together. Vacant land = false.
-- has_structure: true only if a permanent building footprint is inside the RED boundary on the aerial.
+- heavy_garbage_debris: ONLY man-made waste (trash bags, junk cars, rubble). Grass/weeds = false.
+- vacancy_signs: ONLY if structure EXISTS AND boarded + overgrown + no activity ALL together. Empty land = false.
+- has_structure: Is there a building visible at/near the crosshair in the aerial OR in street views? If street views show a house/building, set true even if aerial boundary looks empty.
 
 Return ONLY valid JSON:
 {
@@ -136,9 +149,10 @@ Return ONLY valid JSON:
   "street_frontage": true,
   "heavily_wooded": false,
   "water_hole_on_land": false,
-  "confidence": 0.80,
+  "confidence": 0.82,
   "notes": "clear description of what you see inside the red boundary"
-}"""
+}
+CONFIDENCE: If you can now clearly see the property type → use 0.82+. Only go below 0.70 if still genuinely unclear."""
 
 # ── Targeted risk-flag verification prompt ────────────────────────────────────
 
@@ -202,19 +216,15 @@ class _VisionService:
             logger.error("No images available for vision analysis")
             return {"_no_images": True}
 
-        # Build prompt — prepend type hint when available so the model has context
+        # Vision model MUST determine property type from images only.
+        # Never pass the property_type_hint here — it locks entire batches to one category
+        # (e.g. Alterna "Resi filter" batch would make everything classify as residential).
+        # The hint is used as a last-resort fallback in the rule engine only.
         prompt = ANALYSIS_PROMPT
-        if property_type_hint:
-            hint_clean = property_type_hint.strip().lower()
-            prompt = (
-                f"ZONING HINT FROM COUNTY RECORDS: This parcel is recorded as '{hint_clean}'. "
-                f"Use this as strong prior evidence for property_type, but override it if the images clearly show something different.\n\n"
-                + prompt
-            )
-            logger.info("Vision analysis: property_type_hint='%s'", hint_clean)
 
-        # Pass 1 — primary analysis
-        result = await self._call_model(prompt, images_b64, temperature=0.1)
+        # Pass 1 — temperature=0.2 balances consistency with flexibility.
+        # temperature=0.0 amplified model bias (same type for all properties in a batch).
+        result = await self._call_model(prompt, images_b64, temperature=0.2)
         if result is None:
             return None
 
@@ -317,7 +327,7 @@ class _VisionService:
             "options": {
                 "temperature": temperature,
                 "top_p": 0.9,
-                "num_predict": 600,   # JSON output rarely exceeds 400 tokens (was 1024)
+                "num_predict": 1200,  # JSON + notes can exceed 600 tokens — truncation causes parse failures
                 "num_ctx": 4096,      # explicit context window — prevents model auto-sizing large
             },
         }
@@ -343,12 +353,12 @@ class _VisionService:
 
         images: List[str] = []
         candidates = [
-            (satellite_path,             1024, 1.7),  # satellite — 1024px is sufficient for detail
-            (street_paths.get("center"), 768,  1.5),  # street views — 768px saves ~35% payload
-            (street_paths.get("left"),   768,  1.5),
-            (street_paths.get("right"),  768,  1.5),
+            (satellite_path,             1024, 2.0, True),   # satellite: sharper detail needed
+            (street_paths.get("center"), 960,  1.8, False),  # street center: larger + sharper
+            (street_paths.get("left"),   896,  1.6, False),
+            (street_paths.get("right"),  896,  1.6, False),
         ]
-        for path, max_px, sharpen in candidates:
+        for path, max_px, sharpen, is_satellite in candidates:
             if not path:
                 continue
             p = Path(path)
@@ -360,28 +370,34 @@ class _VisionService:
                 if max(img.size) > max_px:
                     img.thumbnail((max_px, max_px), PILImage.LANCZOS)
 
-                # Adaptive local contrast enhancement (CLAHE) via OpenCV when available.
-                # CLAHE enhances local regions independently, far better than a fixed global
-                # contrast multiplier on satellite/street imagery with mixed lighting zones.
                 if _CV2_AVAILABLE:
                     img_np = np.array(img)
                     lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
                     l_ch, a_ch, b_ch = cv2.split(lab)
-                    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-                    lab = cv2.merge((clahe.apply(l_ch), a_ch, b_ch))
-                    img = PILImage.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
-                    # Lighter fixed boost after CLAHE since local contrast is already handled
+                    # Stronger CLAHE for satellite (smaller tiles = more local contrast)
+                    clip   = 4.0 if is_satellite else 3.0
+                    tile   = (4, 4) if is_satellite else (6, 6)
+                    clahe  = cv2.createCLAHE(clipLimit=clip, tileGridSize=tile)
+                    lab    = cv2.merge((clahe.apply(l_ch), a_ch, b_ch))
+                    img    = PILImage.fromarray(cv2.cvtColor(lab, cv2.COLOR_LAB2RGB))
+                    # Unsharp mask for crisp edges (critical for roof/structure detection)
+                    if is_satellite:
+                        img_np2 = np.array(img)
+                        blur    = cv2.GaussianBlur(img_np2, (0, 0), 2.0)
+                        img_np2 = cv2.addWeighted(img_np2, 1.5, blur, -0.5, 0)
+                        img     = PILImage.fromarray(np.clip(img_np2, 0, 255).astype(np.uint8))
                     img = ImageEnhance.Sharpness(img).enhance(sharpen)
-                    img = ImageEnhance.Contrast(img).enhance(1.05)
-                    img = ImageEnhance.Brightness(img).enhance(1.05)
+                    img = ImageEnhance.Contrast(img).enhance(1.15 if is_satellite else 1.10)
+                    img = ImageEnhance.Brightness(img).enhance(1.08)
                 else:
-                    # Fallback: original Pillow-only pipeline
+                    from PIL import ImageFilter
+                    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
                     img = ImageEnhance.Sharpness(img).enhance(sharpen)
-                    img = ImageEnhance.Contrast(img).enhance(1.15)
-                    img = ImageEnhance.Brightness(img).enhance(1.05)
+                    img = ImageEnhance.Contrast(img).enhance(1.20)
+                    img = ImageEnhance.Brightness(img).enhance(1.08)
 
                 buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=95)
+                img.save(buf, format="JPEG", quality=97)
                 images.append(base64.b64encode(buf.getvalue()).decode())
             except Exception as e:
                 logger.warning("Failed to load image %s: %s", path, e)

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     ollama_timeout: int = 120
 
     # Image capture
-    satellite_zoom: int = 19
+    satellite_zoom: int = 20          # zoom 20 = 0.15m/pixel — 2x sharper than zoom 19
     satellite_image_width: int = 800
     satellite_image_height: int = 800
     street_view_width: int = 1280
